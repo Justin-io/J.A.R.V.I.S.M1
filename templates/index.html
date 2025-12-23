@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>J.A.R.V.I.S. Interface</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700;900&family=Share+Tech+Mono&display=swap"
+        rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        :root {
+            --jarvis-blue: #00f3ff;
+            --jarvis-blue-dim: rgba(0, 243, 255, 0.1);
+            --jarvis-alert: #ff3333;
+            --bg-color: #020408;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--jarvis-blue);
+            font-family: 'Orbitron', sans-serif;
+            overflow: hidden;
+            margin: 0;
+            height: 100vh;
+            width: 100vw;
+        }
+
+        /* Scanline effect */
+        body::after {
+            content: "";
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: linear-gradient(to bottom,
+                    rgba(255, 255, 255, 0),
+                    rgba(255, 255, 255, 0) 50%,
+                    rgba(0, 0, 0, 0.1) 50%,
+                    rgba(0, 0, 0, 0.1));
+            background-size: 100% 3px;
+            pointer-events: none;
+            z-index: 50;
+        }
+
+        /* Vignette */
+        .vignette {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: radial-gradient(circle, transparent 50%, rgba(0, 0, 0, 0.95) 100%);
+            pointer-events: none;
+            z-index: 40;
+        }
+
+        /* Text & Border Utilities */
+        .text-glow {
+            text-shadow: 0 0 5px var(--jarvis-blue), 0 0 10px var(--jarvis-blue);
+        }
+
+        .text-dim {
+            color: rgba(0, 243, 255, 0.6);
+        }
+
+        /* Tech Panels */
+        .tech-panel {
+            background: rgba(0, 15, 30, 0.7);
+            border-left: 1px solid rgba(0, 243, 255, 0.3);
+            border-right: 1px solid rgba(0, 243, 255, 0.3);
+            position: relative;
+            backdrop-filter: blur(4px);
+            transition: all 0.3s ease;
+        }
+
+        .tech-panel:hover {
+            border-color: rgba(0, 243, 255, 0.8);
+            background: rgba(0, 20, 40, 0.8);
+        }
+
+        /* Corner accents */
+        .tech-panel::before,
+        .tech-panel::after {
+            content: '';
+            position: absolute;
+            width: 8px;
+            height: 8px;
+            border: 1px solid var(--jarvis-blue);
+            transition: all 0.3s;
+        }
+
+        .tech-panel::before {
+            top: -1px;
+            left: -1px;
+            border-right: none;
+            border-bottom: none;
+        }
+
+        .tech-panel::after {
+            bottom: -1px;
+            right: -1px;
+            border-left: none;
+            border-top: none;
+        }
+
+        /* Tech Border Box */
+        .tech-border {
+            clip-path: polygon(10px 0,
+                    100% 0,
+                    100% calc(100% - 10px),
+                    calc(100% - 10px) 100%,
+                    0 100%,
+                    0 10px);
+            border-top: 1px solid var(--jarvis-blue-dim);
+        }
+
+        /* Scrollbars */
+        ::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--jarvis-blue);
+            border-radius: 2px;
+        }
+
+        /* Animations */
+        @keyframes pulse-status {
+
+            0%,
+            100% {
+                opacity: 0.6;
+                text-shadow: 0 0 2px var(--jarvis-blue);
+                box-shadow: 0 0 5px var(--jarvis-blue-dim);
+            }
+
+            50% {
+                opacity: 1;
+                text-shadow: 0 0 15px var(--jarvis-blue);
+                box-shadow: 0 0 15px var(--jarvis-blue-dim);
+            }
+        }
+
+        .status-pulse {
+            animation: pulse-status 3s infinite ease-in-out;
+        }
+
+        @keyframes flash-row {
+            0% {
+                background-color: transparent;
+            }
+
+            50% {
+                background-color: rgba(0, 243, 255, 0.15);
+            }
+
+            100% {
+                background-color: transparent;
+            }
+        }
+
+        .flash-row:hover {
+            animation: flash-row 0.8s infinite;
+            cursor: pointer;
+            background: rgba(0, 243, 255, 0.05);
+        }
+
+        /* Smooth Bar Transition */
+        .sys-bar {
+            transition: width 0.5s ease-out, height 0.3s ease-out;
+        }
+
+        /* Canvas Positioning */
+        #canvas-container {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -55%);
+            z-index: 10;
+            width: 800px;
+            height: 800px;
+            pointer-events: none;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="vignette"></div>
+
+    <!-- MAIN UI WRAPPER -->
+    <div class="relative z-30 h-full w-full flex flex-col p-4 md:p-6 pointer-events-none">
+
+        <!-- HEADER -->
+        <header class="flex justify-between items-start pointer-events-auto mb-2 border-b border-cyan-500/20 pb-2">
+            <div class="flex items-center gap-4">
+                <div class="flex flex-col items-center justify-center">
+                    <div class="w-2 h-2 bg-cyan-400 rounded-full mb-1"></div>
+                    <div class="h-8 w-px bg-cyan-500/50"></div>
+                </div>
+                <div>
+                    <h1 class="text-4xl font-bold tracking-[0.15em] text-glow font-orbitron">J.A.R.V.I.S.</h1>
+                    <div class="flex items-center gap-2 mt-1">
+                        <div class="h-1 w-20 bg-cyan-500/30 overflow-hidden">
+                            <div class="h-full bg-cyan-400 w-1/2 animate-pulse"></div>
+                        </div>
+                        <div class="text-[9px] tracking-[0.3em] opacity-70">NEURAL INTERFACE V5.1</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="text-right">
+                <div class="flex items-center justify-end gap-3 mb-1">
+                    <span class="text-[10px] tracking-widest opacity-60">LINK STATUS</span>
+                    <span id="connection-status"
+                        class="font-bold text-xs status-pulse bg-cyan-900/40 px-3 py-1 rounded-sm border border-cyan-500/30">DISCONNECTED</span>
+                </div>
+                <div class="flex justify-end items-baseline gap-2">
+                    <span class="text-[10px] opacity-50">SYS_TIME</span>
+                    <div id="time-display" class="font-mono text-xl tracking-wider text-cyan-200">00:00:00</div>
+                </div>
+            </div>
+        </header>
+
+        <!-- MAIN GRID LAYOUT -->
+        <div class="flex-grow grid grid-cols-1 md:grid-cols-4 gap-6 pointer-events-auto h-0 min-h-0 mt-2">
+
+            <!-- LEFT COLUMN: DEVICES & IOT -->
+            <div class="flex flex-col gap-4 h-full overflow-hidden">
+
+                <!-- Server Status -->
+                <div class="tech-panel p-4 tech-border">
+                    <h3 class="text-xs font-bold tracking-widest border-b border-cyan-500/30 pb-2 mb-3 text-cyan-300">
+                        SERVER CLUSTER LOAD</h3>
+                    <div class="space-y-4 font-mono text-[10px]">
+
+                        <div>
+                            <div class="flex justify-between mb-1"><span class="opacity-70">MAIN_FRAME_01</span><span
+                                    class="text-cyan-300" id="server-1-val">ONLINE</span></div>
+                            <div class="w-full bg-cyan-900/50 h-1">
+                                <div id="server-1-bar"
+                                    class="sys-bar bg-cyan-400 h-full w-[34%] shadow-[0_0_8px_#00f3ff]"></div>
+                            </div>
+                        </div>
+
+                        <div>
+                            <div class="flex justify-between mb-1"><span class="opacity-70">DATA_CORE_ZETA</span><span
+                                    class="text-cyan-300" id="server-2-val">PROCESSING</span></div>
+                            <div class="w-full bg-cyan-900/50 h-1">
+                                <div id="server-2-bar"
+                                    class="sys-bar bg-cyan-400 h-full w-[89%] shadow-[0_0_8px_#00f3ff]"></div>
+                            </div>
+                        </div>
+
+                        <div>
+                            <div class="flex justify-between mb-1"><span class="opacity-70">STORAGE_ARRAY</span><span
+                                    class="text-cyan-300" id="server-3-val">STABLE</span></div>
+                            <div class="w-full bg-cyan-900/50 h-1">
+                                <div id="server-3-bar"
+                                    class="sys-bar bg-cyan-400 h-full w-[12%] shadow-[0_0_8px_#00f3ff]"></div>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-2 pt-2">
+                            <div class="bg-cyan-900/20 p-2 border border-cyan-500/20 text-center">
+                                <div class="opacity-50 text-[9px]">TEMP</div>
+                                <div id="sys-temp" class="text-sm font-bold text-cyan-300">42°C</div>
+                            </div>
+                            <div class="bg-cyan-900/20 p-2 border border-cyan-500/20 text-center">
+                                <div class="opacity-50 text-[9px]">POWER</div>
+                                <div id="sys-power" class="text-sm font-bold text-cyan-300">98%</div>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+
+                <!-- Connected Devices -->
+                <div class="tech-panel p-4 flex-grow overflow-hidden flex flex-col">
+                    <div class="flex justify-between items-center border-b border-cyan-500/30 pb-2 mb-2">
+                        <h3 class="text-xs font-bold tracking-widest text-cyan-300">CONNECTED DEVICES</h3>
+                        <span class="text-[9px] bg-cyan-500/20 px-1 rounded animate-pulse">SCANNING</span>
+                    </div>
+
+                    <ul id="device-list"
+                        class="font-mono text-[11px] space-y-1 overflow-y-auto pr-1 flex-grow custom-scrollbar">
+                        <li
+                            class="flash-row p-2 flex justify-between items-center group border-b border-cyan-500/10 hover:border-cyan-500/50 transition-colors">
+                            <div class="flex items-center gap-2">
+                                <div class="w-1.5 h-1.5 bg-green-500 rounded-full"></div>
+                                <span>SMART_HOME_HUB</span>
+                            </div>
+                            <span class="opacity-50 text-[9px]">192.168.1.10</span>
+                        </li>
+                        <li
+                            class="flash-row p-2 flex justify-between items-center group border-b border-cyan-500/10 hover:border-cyan-500/50 transition-colors">
+                            <div class="flex items-center gap-2">
+                                <div class="w-1.5 h-1.5 bg-green-500 rounded-full"></div>
+                                <span>SECURITY_CAM_GRID</span>
+                            </div>
+                            <span class="device-status opacity-50 text-[9px]">ACTIVE</span>
+                        </li>
+                        <li
+                            class="flash-row p-2 flex justify-between items-center group border-b border-cyan-500/10 hover:border-cyan-500/50 transition-colors">
+                            <div class="flex items-center gap-2">
+                                <div class="w-1.5 h-1.5 bg-yellow-500 rounded-full animate-pulse"></div>
+                                <span>DRONE_SENTRY_04</span>
+                            </div>
+                            <span class="device-status opacity-50 text-[9px]">CHARGING</span>
+                        </li>
+                        <li
+                            class="flash-row p-2 flex justify-between items-center group border-b border-cyan-500/10 hover:border-cyan-500/50 transition-colors">
+                            <div class="flex items-center gap-2">
+                                <div class="w-1.5 h-1.5 bg-green-500 rounded-full"></div>
+                                <span>MAIN_GATE_LOCK</span>
+                            </div>
+                            <span class="opacity-50 text-[9px]">SECURE</span>
+                        </li>
+                        <li
+                            class="flash-row p-2 flex justify-between items-center group border-b border-cyan-500/10 hover:border-cyan-500/50 transition-colors">
+                            <div class="flex items-center gap-2">
+                                <div class="w-1.5 h-1.5 bg-red-500 rounded-full"></div>
+                                <span>EXT_PERIMETER_SENSORS</span>
+                            </div>
+                            <span class="device-status opacity-50 text-[9px]">ALERT</span>
+                        </li>
+                        <li
+                            class="flash-row p-2 flex justify-between items-center group border-b border-cyan-500/10 hover:border-cyan-500/50 transition-colors">
+                            <div class="flex items-center gap-2">
+                                <div class="w-1.5 h-1.5 bg-green-500 rounded-full"></div>
+                                <span>LAB_3D_PRINTER</span>
+                            </div>
+                            <span class="device-status opacity-50 text-[9px]">IDLE</span>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- CENTER COLUMN: NEURAL VISUALIZATION & OUTPUT -->
+            <div class="md:col-span-2 relative flex flex-col justify-end items-center">
+
+                <!-- Floating Status -->
+                <div class="absolute top-10 w-full text-center pointer-events-none">
+                    <div id="ai-status"
+                        class="text-xl md:text-2xl font-bold tracking-[0.3em] text-glow uppercase text-cyan-100">
+                        NEURAL ENGINE: STANDBY
+                    </div>
+                    <div class="text-[10px] text-cyan-400/70 tracking-[0.5em] mt-2">AWAITING INPUT PARAMETERS</div>
+                </div>
+
+                <!-- Main Terminal (Bottom Center) -->
+                <div
+                    class="terminal-window w-full h-56 bg-black/90 border-t border-cyan-500/50 rounded-tl-lg rounded-tr-lg overflow-hidden flex flex-col backdrop-blur-md shadow-[0_-5px_20px_rgba(0,243,255,0.1)]">
+                    <div
+                        class="bg-cyan-900/20 px-3 py-1.5 text-[10px] flex justify-between border-b border-cyan-500/30 items-center">
+                        <span class="tracking-widest text-cyan-400">CONSOLE_OUT // ROOT_ACCESS</span>
+                        <div class="flex gap-2 font-mono text-cyan-600">
+                            <span id="pid-val">PID:4092</span>
+                            <span id="mem-val">MEM:24%</span>
+                        </div>
+                    </div>
+                    <div id="terminal-content"
+                        class="p-4 font-mono text-xs text-cyan-300/80 overflow-y-auto flex-grow space-y-1.5">
+                        <!-- Logs inject here -->
+                        <div class="opacity-50 border-l-2 border-cyan-800 pl-2">>> Initializing neural weights... OK
+                        </div>
+                        <div class="opacity-50 border-l-2 border-cyan-800 pl-2">>> Mounting device file system... OK
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- RIGHT COLUMN: FILES & ALGORITHMS -->
+            <div class="flex flex-col gap-4 h-full overflow-hidden">
+
+                <!-- Algorithm Status -->
+                <div class="tech-panel p-4 flex-grow flex flex-col">
+                    <h3 class="text-xs font-bold tracking-widest border-b border-cyan-500/30 pb-2 mb-2 text-cyan-300">
+                        ACTIVE THREADS</h3>
+                    <div class="font-mono text-[11px] overflow-y-auto pr-1 flex-grow space-y-3">
+
+                        <div class="mb-2">
+                            <div class="text-cyan-100 opacity-60 mb-1 text-[10px]">/PROCESS/VISION</div>
+                            <div class="pl-2 border-l border-cyan-500/30 space-y-1.5">
+                                <div class="flash-row flex items-center justify-between"><span
+                                        class="text-cyan-400">object_recognition.py</span> <span
+                                        class="text-[9px] bg-cyan-900 px-1 rounded">RUNNING</span></div>
+                                <div class="flash-row flex items-center justify-between"><span
+                                        class="text-cyan-400">facial_scan_v2.exe</span> <span
+                                        class="text-[9px] bg-cyan-900 px-1 rounded">IDLE</span></div>
+                            </div>
+                        </div>
+
+                        <div>
+                            <div class="text-cyan-100 opacity-60 mb-1 text-[10px]">/PROCESS/LANGUAGE</div>
+                            <div class="pl-2 border-l border-cyan-500/30 space-y-1.5">
+                                <div class="flash-row flex items-center justify-between"><span
+                                        class="text-cyan-400">nlp_core_en.lib</span> <span
+                                        class="text-[9px] bg-cyan-900 px-1 rounded">LOADED</span></div>
+                                <div class="flash-row flex items-center justify-between"><span
+                                        class="text-cyan-400">voice_synth_mod.dll</span> <span
+                                        class="text-[9px] bg-cyan-900 px-1 rounded">ACTIVE</span></div>
+                            </div>
+                        </div>
+
+                        <div>
+                            <div class="text-cyan-100 opacity-60 mb-1 text-[10px]">/PROCESS/NETWORK</div>
+                            <div class="pl-2 border-l border-cyan-500/30 space-y-1.5">
+                                <div class="flash-row flex items-center justify-between"><span
+                                        class="text-cyan-400">packet_sniffer.sh</span> <span
+                                        class="text-[9px] bg-cyan-900 px-1 rounded">BG</span></div>
+                                <div class="flash-row flex items-center justify-between"><span
+                                        class="text-cyan-400">firewall_daemon</span> <span
+                                        class="text-[9px] bg-cyan-900 px-1 rounded">ACTIVE</span></div>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+
+                <!-- Network Topology (Active Visualizer) -->
+                <div class="tech-panel h-32 p-4 relative overflow-hidden flex flex-col justify-between">
+                    <div class="text-[10px] opacity-60 tracking-widest mb-1">NETWORK_TRAFFIC</div>
+                    <!-- Mock Graph Bars -->
+                    <div class="flex items-end justify-between h-full gap-1 pt-2" id="network-graph">
+                        <div class="sys-bar w-1 bg-cyan-600 h-[30%]"></div>
+                        <div class="sys-bar w-1 bg-cyan-500 h-[50%]"></div>
+                        <div class="sys-bar w-1 bg-cyan-400 h-[80%]"></div>
+                        <div class="sys-bar w-1 bg-cyan-300 h-[40%]"></div>
+                        <div class="sys-bar w-1 bg-cyan-400 h-[60%]"></div>
+                        <div class="sys-bar w-1 bg-cyan-500 h-[90%]"></div>
+                        <div class="sys-bar w-1 bg-cyan-600 h-[45%]"></div>
+                        <div class="sys-bar w-1 bg-cyan-500 h-[70%]"></div>
+                        <div class="sys-bar w-1 bg-cyan-400 h-[30%]"></div>
+                        <div class="sys-bar w-1 bg-cyan-300 h-[60%]"></div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <!-- THREE.JS CONTAINER -->
+    <div id="canvas-container"></div>
+
+    <!-- Socket.IO & Main Script -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body>
+
+</html>

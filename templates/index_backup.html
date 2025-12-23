@@ -1,0 +1,752 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>J.A.R.V.I.S. Interface</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700;900&family=Share+Tech+Mono&display=swap"
+        rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        :root {
+            --jarvis-blue: #00f3ff;
+            --jarvis-blue-dim: rgba(0, 243, 255, 0.1);
+            --jarvis-alert: #ff3333;
+            --bg-color: #020408;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--jarvis-blue);
+            font-family: 'Orbitron', sans-serif;
+            overflow: hidden;
+            margin: 0;
+            height: 100vh;
+            width: 100vw;
+        }
+
+        /* Scanline effect */
+        body::after {
+            content: "";
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: linear-gradient(to bottom,
+                    rgba(255, 255, 255, 0),
+                    rgba(255, 255, 255, 0) 50%,
+                    rgba(0, 0, 0, 0.1) 50%,
+                    rgba(0, 0, 0, 0.1));
+            background-size: 100% 3px;
+            pointer-events: none;
+            z-index: 50;
+        }
+
+        /* Vignette */
+        .vignette {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: radial-gradient(circle, transparent 50%, rgba(0, 0, 0, 0.95) 100%);
+            pointer-events: none;
+            z-index: 40;
+        }
+
+        /* Text & Border Utilities */
+        .text-glow {
+            text-shadow: 0 0 5px var(--jarvis-blue), 0 0 10px var(--jarvis-blue);
+        }
+
+        .text-dim {
+            color: rgba(0, 243, 255, 0.6);
+        }
+
+        /* Tech Panels */
+        .tech-panel {
+            background: rgba(0, 15, 30, 0.7);
+            border-left: 1px solid rgba(0, 243, 255, 0.3);
+            border-right: 1px solid rgba(0, 243, 255, 0.3);
+            position: relative;
+            backdrop-filter: blur(4px);
+            transition: all 0.3s ease;
+        }
+
+        .tech-panel:hover {
+            border-color: rgba(0, 243, 255, 0.8);
+            background: rgba(0, 20, 40, 0.8);
+        }
+
+        /* Corner accents */
+        .tech-panel::before,
+        .tech-panel::after {
+            content: '';
+            position: absolute;
+            width: 8px;
+            height: 8px;
+            border: 1px solid var(--jarvis-blue);
+            transition: all 0.3s;
+        }
+
+        .tech-panel::before {
+            top: -1px;
+            left: -1px;
+            border-right: none;
+            border-bottom: none;
+        }
+
+        .tech-panel::after {
+            bottom: -1px;
+            right: -1px;
+            border-left: none;
+            border-top: none;
+        }
+
+        /* Tech Border Box */
+        .tech-border {
+            clip-path: polygon(10px 0,
+                    100% 0,
+                    100% calc(100% - 10px),
+                    calc(100% - 10px) 100%,
+                    0 100%,
+                    0 10px);
+            border-top: 1px solid var(--jarvis-blue-dim);
+        }
+
+        /* Scrollbars */
+        ::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--jarvis-blue);
+            border-radius: 2px;
+        }
+
+        /* Animations */
+        @keyframes pulse-status {
+
+            0%,
+            100% {
+                opacity: 0.6;
+                text-shadow: 0 0 2px var(--jarvis-blue);
+                box-shadow: 0 0 5px var(--jarvis-blue-dim);
+            }
+
+            50% {
+                opacity: 1;
+                text-shadow: 0 0 15px var(--jarvis-blue);
+                box-shadow: 0 0 15px var(--jarvis-blue-dim);
+            }
+        }
+
+        .status-pulse {
+            animation: pulse-status 3s infinite ease-in-out;
+        }
+
+        @keyframes flash-row {
+            0% {
+                background-color: transparent;
+            }
+
+            50% {
+                background-color: rgba(0, 243, 255, 0.15);
+            }
+
+            100% {
+                background-color: transparent;
+            }
+        }
+
+        .flash-row:hover {
+            animation: flash-row 0.8s infinite;
+            cursor: pointer;
+            background: rgba(0, 243, 255, 0.05);
+        }
+
+        /* Smooth Bar Transition */
+        .sys-bar {
+            transition: width 0.5s ease-out, height 0.3s ease-out;
+        }
+
+        /* Canvas Positioning */
+        #canvas-container {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -55%);
+            z-index: 10;
+            width: 800px;
+            height: 800px;
+            pointer-events: none;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="vignette"></div>
+
+    <!-- MAIN UI WRAPPER -->
+    <div class="relative z-30 h-full w-full flex flex-col p-4 md:p-6 pointer-events-none">
+
+        <!-- HEADER -->
+        <header class="flex justify-between items-start pointer-events-auto mb-2 border-b border-cyan-500/20 pb-2">
+            <div class="flex items-center gap-4">
+                <div class="flex flex-col items-center justify-center">
+                    <div class="w-2 h-2 bg-cyan-400 rounded-full mb-1"></div>
+                    <div class="h-8 w-px bg-cyan-500/50"></div>
+                </div>
+                <div>
+                    <h1 class="text-4xl font-bold tracking-[0.15em] text-glow font-orbitron">J.A.R.V.I.S.</h1>
+                    <div class="flex items-center gap-2 mt-1">
+                        <div class="h-1 w-20 bg-cyan-500/30 overflow-hidden">
+                            <div class="h-full bg-cyan-400 w-1/2 animate-pulse"></div>
+                        </div>
+                        <div class="text-[9px] tracking-[0.3em] opacity-70">NEURAL INTERFACE V5.1</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="text-right">
+                <div class="flex items-center justify-end gap-3 mb-1">
+                    <span class="text-[10px] tracking-widest opacity-60">LINK STATUS</span>
+                    <span id="connection-status"
+                        class="font-bold text-xs status-pulse bg-cyan-900/40 px-3 py-1 rounded-sm border border-cyan-500/30">DISCONNECTED</span>
+                </div>
+                <div class="flex justify-end items-baseline gap-2">
+                    <span class="text-[10px] opacity-50">SYS_TIME</span>
+                    <div id="time-display" class="font-mono text-xl tracking-wider text-cyan-200">00:00:00</div>
+                </div>
+            </div>
+        </header>
+
+        <!-- MAIN GRID LAYOUT -->
+        <div class="flex-grow grid grid-cols-1 md:grid-cols-4 gap-6 pointer-events-auto h-0 min-h-0 mt-2">
+
+            <!-- LEFT COLUMN: DEVICES & IOT -->
+            <div class="flex flex-col gap-4 h-full overflow-hidden">
+
+                <!-- Server Status -->
+                <div class="tech-panel p-4 tech-border">
+                    <h3 class="text-xs font-bold tracking-widest border-b border-cyan-500/30 pb-2 mb-3 text-cyan-300">
+                        SERVER CLUSTER LOAD</h3>
+                    <div class="space-y-4 font-mono text-[10px]">
+
+                        <div>
+                            <div class="flex justify-between mb-1"><span class="opacity-70">MAIN_FRAME_01</span><span
+                                    class="text-cyan-300" id="server-1-val">ONLINE</span></div>
+                            <div class="w-full bg-cyan-900/50 h-1">
+                                <div id="server-1-bar"
+                                    class="sys-bar bg-cyan-400 h-full w-[34%] shadow-[0_0_8px_#00f3ff]"></div>
+                            </div>
+                        </div>
+
+                        <div>
+                            <div class="flex justify-between mb-1"><span class="opacity-70">DATA_CORE_ZETA</span><span
+                                    class="text-cyan-300" id="server-2-val">PROCESSING</span></div>
+                            <div class="w-full bg-cyan-900/50 h-1">
+                                <div id="server-2-bar"
+                                    class="sys-bar bg-cyan-400 h-full w-[89%] shadow-[0_0_8px_#00f3ff]"></div>
+                            </div>
+                        </div>
+
+                        <div>
+                            <div class="flex justify-between mb-1"><span class="opacity-70">STORAGE_ARRAY</span><span
+                                    class="text-cyan-300" id="server-3-val">STABLE</span></div>
+                            <div class="w-full bg-cyan-900/50 h-1">
+                                <div id="server-3-bar"
+                                    class="sys-bar bg-cyan-400 h-full w-[12%] shadow-[0_0_8px_#00f3ff]"></div>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-2 pt-2">
+                            <div class="bg-cyan-900/20 p-2 border border-cyan-500/20 text-center">
+                                <div class="opacity-50 text-[9px]">TEMP</div>
+                                <div id="sys-temp" class="text-sm font-bold text-cyan-300">42°C</div>
+                            </div>
+                            <div class="bg-cyan-900/20 p-2 border border-cyan-500/20 text-center">
+                                <div class="opacity-50 text-[9px]">POWER</div>
+                                <div id="sys-power" class="text-sm font-bold text-cyan-300">98%</div>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+
+                <!-- Connected Devices -->
+                <div class="tech-panel p-4 flex-grow overflow-hidden flex flex-col">
+                    <div class="flex justify-between items-center border-b border-cyan-500/30 pb-2 mb-2">
+                        <h3 class="text-xs font-bold tracking-widest text-cyan-300">CONNECTED DEVICES</h3>
+                        <span class="text-[9px] bg-cyan-500/20 px-1 rounded animate-pulse">SCANNING</span>
+                    </div>
+
+                    <ul id="device-list"
+                        class="font-mono text-[11px] space-y-1 overflow-y-auto pr-1 flex-grow custom-scrollbar">
+                        <li
+                            class="flash-row p-2 flex justify-between items-center group border-b border-cyan-500/10 hover:border-cyan-500/50 transition-colors">
+                            <div class="flex items-center gap-2">
+                                <div class="w-1.5 h-1.5 bg-green-500 rounded-full"></div>
+                                <span>SMART_HOME_HUB</span>
+                            </div>
+                            <span class="opacity-50 text-[9px]">192.168.1.10</span>
+                        </li>
+                        <li
+                            class="flash-row p-2 flex justify-between items-center group border-b border-cyan-500/10 hover:border-cyan-500/50 transition-colors">
+                            <div class="flex items-center gap-2">
+                                <div class="w-1.5 h-1.5 bg-green-500 rounded-full"></div>
+                                <span>SECURITY_CAM_GRID</span>
+                            </div>
+                            <span class="device-status opacity-50 text-[9px]">ACTIVE</span>
+                        </li>
+                        <li
+                            class="flash-row p-2 flex justify-between items-center group border-b border-cyan-500/10 hover:border-cyan-500/50 transition-colors">
+                            <div class="flex items-center gap-2">
+                                <div class="w-1.5 h-1.5 bg-yellow-500 rounded-full animate-pulse"></div>
+                                <span>DRONE_SENTRY_04</span>
+                            </div>
+                            <span class="device-status opacity-50 text-[9px]">CHARGING</span>
+                        </li>
+                        <li
+                            class="flash-row p-2 flex justify-between items-center group border-b border-cyan-500/10 hover:border-cyan-500/50 transition-colors">
+                            <div class="flex items-center gap-2">
+                                <div class="w-1.5 h-1.5 bg-green-500 rounded-full"></div>
+                                <span>MAIN_GATE_LOCK</span>
+                            </div>
+                            <span class="opacity-50 text-[9px]">SECURE</span>
+                        </li>
+                        <li
+                            class="flash-row p-2 flex justify-between items-center group border-b border-cyan-500/10 hover:border-cyan-500/50 transition-colors">
+                            <div class="flex items-center gap-2">
+                                <div class="w-1.5 h-1.5 bg-red-500 rounded-full"></div>
+                                <span>EXT_PERIMETER_SENSORS</span>
+                            </div>
+                            <span class="device-status opacity-50 text-[9px]">ALERT</span>
+                        </li>
+                        <li
+                            class="flash-row p-2 flex justify-between items-center group border-b border-cyan-500/10 hover:border-cyan-500/50 transition-colors">
+                            <div class="flex items-center gap-2">
+                                <div class="w-1.5 h-1.5 bg-green-500 rounded-full"></div>
+                                <span>LAB_3D_PRINTER</span>
+                            </div>
+                            <span class="device-status opacity-50 text-[9px]">IDLE</span>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- CENTER COLUMN: NEURAL VISUALIZATION & OUTPUT -->
+            <div class="md:col-span-2 relative flex flex-col justify-end items-center">
+
+                <!-- Floating Status -->
+                <div class="absolute top-10 w-full text-center pointer-events-none">
+                    <div id="ai-status"
+                        class="text-xl md:text-2xl font-bold tracking-[0.3em] text-glow uppercase text-cyan-100">
+                        NEURAL ENGINE: STANDBY
+                    </div>
+                    <div class="text-[10px] text-cyan-400/70 tracking-[0.5em] mt-2">AWAITING INPUT PARAMETERS</div>
+                </div>
+
+                <!-- Main Terminal (Bottom Center) -->
+                <div
+                    class="terminal-window w-full h-56 bg-black/90 border-t border-cyan-500/50 rounded-tl-lg rounded-tr-lg overflow-hidden flex flex-col backdrop-blur-md shadow-[0_-5px_20px_rgba(0,243,255,0.1)]">
+                    <div
+                        class="bg-cyan-900/20 px-3 py-1.5 text-[10px] flex justify-between border-b border-cyan-500/30 items-center">
+                        <span class="tracking-widest text-cyan-400">CONSOLE_OUT // ROOT_ACCESS</span>
+                        <div class="flex gap-2 font-mono text-cyan-600">
+                            <span id="pid-val">PID:4092</span>
+                            <span id="mem-val">MEM:24%</span>
+                        </div>
+                    </div>
+                    <div id="terminal-content"
+                        class="p-4 font-mono text-xs text-cyan-300/80 overflow-y-auto flex-grow space-y-1.5">
+                        <!-- Logs inject here -->
+                        <div class="opacity-50 border-l-2 border-cyan-800 pl-2">>> Initializing neural weights... OK
+                        </div>
+                        <div class="opacity-50 border-l-2 border-cyan-800 pl-2">>> Mounting device file system... OK
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- RIGHT COLUMN: FILES & ALGORITHMS -->
+            <div class="flex flex-col gap-4 h-full overflow-hidden">
+
+                <!-- Algorithm Status -->
+                <div class="tech-panel p-4 flex-grow flex flex-col">
+                    <h3 class="text-xs font-bold tracking-widest border-b border-cyan-500/30 pb-2 mb-2 text-cyan-300">
+                        ACTIVE THREADS</h3>
+                    <div class="font-mono text-[11px] overflow-y-auto pr-1 flex-grow space-y-3">
+
+                        <div class="mb-2">
+                            <div class="text-cyan-100 opacity-60 mb-1 text-[10px]">/PROCESS/VISION</div>
+                            <div class="pl-2 border-l border-cyan-500/30 space-y-1.5">
+                                <div class="flash-row flex items-center justify-between"><span
+                                        class="text-cyan-400">object_recognition.py</span> <span
+                                        class="text-[9px] bg-cyan-900 px-1 rounded">RUNNING</span></div>
+                                <div class="flash-row flex items-center justify-between"><span
+                                        class="text-cyan-400">facial_scan_v2.exe</span> <span
+                                        class="text-[9px] bg-cyan-900 px-1 rounded">IDLE</span></div>
+                            </div>
+                        </div>
+
+                        <div>
+                            <div class="text-cyan-100 opacity-60 mb-1 text-[10px]">/PROCESS/LANGUAGE</div>
+                            <div class="pl-2 border-l border-cyan-500/30 space-y-1.5">
+                                <div class="flash-row flex items-center justify-between"><span
+                                        class="text-cyan-400">nlp_core_en.lib</span> <span
+                                        class="text-[9px] bg-cyan-900 px-1 rounded">LOADED</span></div>
+                                <div class="flash-row flex items-center justify-between"><span
+                                        class="text-cyan-400">voice_synth_mod.dll</span> <span
+                                        class="text-[9px] bg-cyan-900 px-1 rounded">ACTIVE</span></div>
+                            </div>
+                        </div>
+
+                        <div>
+                            <div class="text-cyan-100 opacity-60 mb-1 text-[10px]">/PROCESS/NETWORK</div>
+                            <div class="pl-2 border-l border-cyan-500/30 space-y-1.5">
+                                <div class="flash-row flex items-center justify-between"><span
+                                        class="text-cyan-400">packet_sniffer.sh</span> <span
+                                        class="text-[9px] bg-cyan-900 px-1 rounded">BG</span></div>
+                                <div class="flash-row flex items-center justify-between"><span
+                                        class="text-cyan-400">firewall_daemon</span> <span
+                                        class="text-[9px] bg-cyan-900 px-1 rounded">ACTIVE</span></div>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+
+                <!-- Network Topology (Active Visualizer) -->
+                <div class="tech-panel h-32 p-4 relative overflow-hidden flex flex-col justify-between">
+                    <div class="text-[10px] opacity-60 tracking-widest mb-1">NETWORK_TRAFFIC</div>
+                    <!-- Mock Graph Bars -->
+                    <div class="flex items-end justify-between h-full gap-1 pt-2" id="network-graph">
+                        <div class="sys-bar w-1 bg-cyan-600 h-[30%]"></div>
+                        <div class="sys-bar w-1 bg-cyan-500 h-[50%]"></div>
+                        <div class="sys-bar w-1 bg-cyan-400 h-[80%]"></div>
+                        <div class="sys-bar w-1 bg-cyan-300 h-[40%]"></div>
+                        <div class="sys-bar w-1 bg-cyan-400 h-[60%]"></div>
+                        <div class="sys-bar w-1 bg-cyan-500 h-[90%]"></div>
+                        <div class="sys-bar w-1 bg-cyan-600 h-[45%]"></div>
+                        <div class="sys-bar w-1 bg-cyan-500 h-[70%]"></div>
+                        <div class="sys-bar w-1 bg-cyan-400 h-[30%]"></div>
+                        <div class="sys-bar w-1 bg-cyan-300 h-[60%]"></div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <!-- THREE.JS CONTAINER -->
+    <div id="canvas-container"></div>
+
+    <script>
+        (function () {
+            // --- CLOCK UTILITY ---
+            function updateTime() {
+                const now = new Date();
+                const timeDisplay = document.getElementById('time-display');
+                if (timeDisplay) {
+                    timeDisplay.innerText = now.toLocaleTimeString('en-US', { hour12: false });
+                }
+            }
+            setInterval(updateTime, 1000);
+            updateTime();
+
+            // --- THREE.JS ADVANCED NEURAL VISUALIZATION ---
+            const container = document.getElementById('canvas-container');
+
+            if (container) {
+                const scene = new THREE.Scene();
+                // Subtler fog for deep space feel
+                scene.fog = new THREE.FogExp2(0x020408, 0.003);
+
+                const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 1000);
+                camera.position.z = 20;
+
+                const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+                renderer.setSize(800, 800);
+                renderer.setPixelRatio(window.devicePixelRatio);
+                container.appendChild(renderer.domElement);
+
+                // --- GROUPING ---
+                const brainGroup = new THREE.Group();
+                scene.add(brainGroup);
+
+                // 1. INNER CORE (Dense Wireframe Sphere)
+                const coreGeo = new THREE.IcosahedronGeometry(4, 2);
+                const coreMat = new THREE.MeshBasicMaterial({
+                    color: 0x00f3ff,
+                    wireframe: true,
+                    transparent: true,
+                    opacity: 0.15
+                });
+                const coreMesh = new THREE.Mesh(coreGeo, coreMat);
+                brainGroup.add(coreMesh);
+
+                // 2. NEURAL CLOUD (Nodes & Lines)
+                const particleCount = 400; // Increased count
+                const cloudRadius = 9;
+                const particlesData = [];
+                let particlePositions = new Float32Array(particleCount * 3);
+
+                const pMaterial = new THREE.PointsMaterial({
+                    color: 0x00f3ff,
+                    size: 0.15,
+                    blending: THREE.AdditiveBlending,
+                    transparent: true,
+                    opacity: 0.8
+                });
+
+                // Generate random points in a spherical shell
+                for (let i = 0; i < particleCount; i++) {
+                    const r = cloudRadius + (Math.random() - 0.5) * 4; // Vary radius for depth
+                    const theta = Math.random() * Math.PI * 2;
+                    const phi = Math.acos((Math.random() * 2) - 1);
+
+                    const x = r * Math.sin(phi) * Math.cos(theta);
+                    const y = r * Math.sin(phi) * Math.sin(theta);
+                    const z = r * Math.cos(phi);
+
+                    particlePositions[i * 3] = x;
+                    particlePositions[i * 3 + 1] = y;
+                    particlePositions[i * 3 + 2] = z;
+
+                    particlesData.push({
+                        velocity: new THREE.Vector3(
+                            (-1 + Math.random() * 2) * 0.02,
+                            (-1 + Math.random() * 2) * 0.02,
+                            (-1 + Math.random() * 2) * 0.02
+                        ),
+                        originalPos: new THREE.Vector3(x, y, z)
+                    });
+                }
+
+                const particlesGeo = new THREE.BufferGeometry();
+                particlesGeo.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
+                const particleSystem = new THREE.Points(particlesGeo, pMaterial);
+                brainGroup.add(particleSystem);
+
+                // Lines setup
+                const maxConnections = particleCount;
+                const linesGeo = new THREE.BufferGeometry();
+                const linePositions = new Float32Array(maxConnections * maxConnections * 3);
+                const lineColors = new Float32Array(maxConnections * maxConnections * 3);
+
+                linesGeo.setAttribute('position', new THREE.BufferAttribute(linePositions, 3));
+                linesGeo.setAttribute('color', new THREE.BufferAttribute(lineColors, 3));
+
+                const lMaterial = new THREE.LineBasicMaterial({
+                    vertexColors: true,
+                    blending: THREE.AdditiveBlending,
+                    transparent: true,
+                    opacity: 0.2
+                });
+
+                const linesMesh = new THREE.LineSegments(linesGeo, lMaterial);
+                brainGroup.add(linesMesh);
+
+                // 3. ORBITAL RINGS (Fast moving outer data)
+                const ringGroup = new THREE.Group();
+                brainGroup.add(ringGroup);
+
+                function createOrbitalRing(radius, count, speedX, speedY) {
+                    const ringGeo = new THREE.BufferGeometry();
+                    const ringPos = new Float32Array(count * 3);
+                    for (let i = 0; i < count; i++) {
+                        const theta = (i / count) * Math.PI * 2;
+                        ringPos[i * 3] = Math.cos(theta) * radius;
+                        ringPos[i * 3 + 1] = Math.sin(theta) * radius;
+                        ringPos[i * 3 + 2] = (Math.random() - 0.5) * 0.5;
+                    }
+                    ringGeo.setAttribute('position', new THREE.BufferAttribute(ringPos, 3));
+                    const ringMat = new THREE.PointsMaterial({ color: 0x00f3ff, size: 0.1, transparent: true, opacity: 0.6 });
+                    const ring = new THREE.Points(ringGeo, ringMat);
+                    ring.userData = { speedX, speedY };
+                    return ring;
+                }
+
+                const ring1 = createOrbitalRing(11, 100, 0.005, 0.01);
+                const ring2 = createOrbitalRing(13, 80, -0.01, 0.002);
+                ringGroup.add(ring1);
+                ringGroup.add(ring2);
+
+
+                // --- ANIMATION LOOP ---
+                function animate() {
+                    requestAnimationFrame(animate);
+
+                    // 1. Rotate entire group
+                    brainGroup.rotation.y += 0.002;
+
+                    // 2. Animate Core
+                    coreMesh.rotation.x -= 0.005;
+                    coreMesh.rotation.z += 0.002;
+
+                    // 3. Animate Particles & Lines
+                    let vertexpos = 0;
+                    let colorpos = 0;
+                    let numConnected = 0;
+
+                    // Update particles
+                    for (let i = 0; i < particleCount; i++) {
+                        // Jitter particles
+                        const p = particlesData[i];
+                        // Constrain to radius roughly
+                        particlePositions[i * 3] += p.velocity.x;
+                        particlePositions[i * 3 + 1] += p.velocity.y;
+                        particlePositions[i * 3 + 2] += p.velocity.z;
+
+                        // Very simple bounce back logic
+                        if (Math.abs(particlePositions[i * 3] - p.originalPos.x) > 1) p.velocity.x = -p.velocity.x;
+                        if (Math.abs(particlePositions[i * 3 + 1] - p.originalPos.y) > 1) p.velocity.y = -p.velocity.y;
+                        if (Math.abs(particlePositions[i * 3 + 2] - p.originalPos.z) > 1) p.velocity.z = -p.velocity.z;
+                    }
+                    particlesGeo.attributes.position.needsUpdate = true;
+
+                    // Connect lines (Optimize: only check subset or smaller distance)
+                    const connectionDist = 2.5;
+
+                    for (let i = 0; i < particleCount; i++) {
+                        for (let j = i + 1; j < particleCount; j++) {
+                            const dx = particlePositions[i * 3] - particlePositions[j * 3];
+                            const dy = particlePositions[i * 3 + 1] - particlePositions[j * 3 + 1];
+                            const dz = particlePositions[i * 3 + 2] - particlePositions[j * 3 + 2];
+                            const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+                            if (dist < connectionDist) {
+                                const alpha = 1.0 - dist / connectionDist;
+
+                                linePositions[vertexpos++] = particlePositions[i * 3];
+                                linePositions[vertexpos++] = particlePositions[i * 3 + 1];
+                                linePositions[vertexpos++] = particlePositions[i * 3 + 2];
+
+                                linePositions[vertexpos++] = particlePositions[j * 3];
+                                linePositions[vertexpos++] = particlePositions[j * 3 + 1];
+                                linePositions[vertexpos++] = particlePositions[j * 3 + 2];
+
+                                lineColors[colorpos++] = 0; lineColors[colorpos++] = alpha; lineColors[colorpos++] = 1;
+                                lineColors[colorpos++] = 0; lineColors[colorpos++] = alpha; lineColors[colorpos++] = 1;
+
+                                numConnected++;
+                            }
+                        }
+                    }
+
+                    linesMesh.geometry.setDrawRange(0, numConnected * 2);
+                    linesMesh.geometry.attributes.position.needsUpdate = true;
+                    linesMesh.geometry.attributes.color.needsUpdate = true;
+
+                    // 4. Animate Rings
+                    ring1.rotation.x += ring1.userData.speedX;
+                    ring1.rotation.y += ring1.userData.speedY;
+                    ring2.rotation.x += ring2.userData.speedX;
+                    ring2.rotation.y += ring2.userData.speedY;
+
+                    renderer.render(scene, camera);
+                }
+                animate();
+            }
+
+
+            // --- MOCK DATA SIMULATION (The "Life" of the Dashboard) ---
+
+            // 1. Terminal Logger
+            const terminal = document.getElementById('terminal-content');
+            function addLog(message) {
+                if (!terminal) return;
+                const div = document.createElement('div');
+                div.className = 'text-cyan-300 opacity-80 border-l-2 border-transparent hover:border-cyan-500 pl-2 py-0.5 animate-pulse-fast';
+                div.innerHTML = `<span class="text-[10px] text-cyan-600 mr-2 font-bold">[${new Date().toLocaleTimeString('en-US', { hour12: false })}]</span> <span class="text-xs font-mono">${message}</span>`;
+                terminal.appendChild(div);
+                if (terminal.children.length > 20) terminal.removeChild(terminal.firstChild); // Keep DOM light
+                terminal.scrollTop = terminal.scrollHeight;
+            }
+
+            // 2. Update System Bars & Text
+            function updateSystemStats() {
+                // Server Load Bars
+                document.getElementById('server-1-bar').style.width = Math.floor(Math.random() * 40 + 30) + '%'; // 30-70%
+                document.getElementById('server-2-bar').style.width = Math.floor(Math.random() * 20 + 70) + '%'; // 70-90%
+                document.getElementById('server-3-bar').style.width = Math.floor(Math.random() * 10 + 5) + '%';  // 5-15%
+
+                // Temp & Power
+                document.getElementById('sys-temp').innerText = Math.floor(Math.random() * 5 + 40) + '°C';
+                document.getElementById('sys-power').innerText = Math.floor(Math.random() * 3 + 96) + '%';
+
+                // Memory PID
+                document.getElementById('mem-val').innerText = 'MEM:' + Math.floor(Math.random() * 10 + 20) + '%';
+            }
+
+            // 3. Animate Network Graph
+            function updateNetworkGraph() {
+                const bars = document.querySelectorAll('#network-graph .sys-bar');
+                bars.forEach(bar => {
+                    bar.style.height = Math.floor(Math.random() * 80 + 10) + '%';
+                });
+            }
+
+            // 4. Device Status Rotation
+            function updateDeviceStatus() {
+                const statuses = document.querySelectorAll('.device-status');
+                const randomIdx = Math.floor(Math.random() * statuses.length);
+                const el = statuses[randomIdx];
+
+                const states = ['ACTIVE', 'PINGING', 'SENDING', 'IDLE'];
+                const newState = states[Math.floor(Math.random() * states.length)];
+
+                el.innerText = newState;
+                if (newState === 'ACTIVE' || newState === 'SENDING') el.className = 'device-status text-cyan-300 text-[9px]';
+                else el.className = 'device-status opacity-50 text-[9px]';
+            }
+
+            // --- START SIMULATION ---
+            setTimeout(() => {
+                const statusEl = document.getElementById('connection-status');
+                const aiStatusEl = document.getElementById('ai-status');
+
+                if (statusEl) {
+                    statusEl.innerText = "SECURE LINK ESTABLISHED";
+                    statusEl.classList.remove('text-red-500');
+                    statusEl.classList.add('text-cyan-300', 'bg-cyan-500/20', 'border-cyan-400');
+                }
+
+                if (aiStatusEl) {
+                    aiStatusEl.innerHTML = "NEURAL ENGINE: <span class='text-cyan-300 drop-shadow-[0_0_10px_rgba(0,243,255,0.8)]'>ONLINE</span>";
+                }
+
+                addLog(">> Handshake protocol complete.");
+                addLog(">> Neural weights loaded into memory.");
+
+                // Start Interval Loops
+                setInterval(() => {
+                    const logs = [
+                        "Optimizing neural pathways...", "Garbage collection active...",
+                        "Packet sniffing: 192.168.1.X...", "Updating heuristic models...",
+                        "Thermal throttling check... OK", "Syncing cloud replica...",
+                        "Analyzing biometric feed...", "Background process [PID:8821] started"
+                    ];
+                    addLog(">> " + logs[Math.floor(Math.random() * logs.length)]);
+                }, 2000);
+
+                setInterval(updateSystemStats, 1500);
+                setInterval(updateNetworkGraph, 300); // Fast update for graph
+                setInterval(updateDeviceStatus, 3000);
+
+            }, 1000);
+
+        })();
+    </script>
+</body>
+
+</html>
