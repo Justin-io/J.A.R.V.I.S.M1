@@ -205,50 +205,63 @@ class JarvisAssistant:
         self.engine.setProperty('rate', 160)
         self.engine.setProperty('volume', 1.0)
 
-    async def _generate_edge_voice(self, text, output_file):
+    async def _stream_edge_voice(self, text):
         """
-        Generate voice file using Edge TTS (async).
-        Voice: 'en-GB-RyanNeural' (Closest to JARVIS style) or 'en-US-ChristopherNeural'
+        Generate and stream voice using Edge TTS directly to mpg123.
+        Reduces latency (TTFB) significantly by playing chunks as they arrive.
         """
-        voice = "en-GB-RyanNeural" 
-        communicate = edge_tts.Communicate(text, voice)
-        await communicate.save(output_file)
+        voice = "en-GB-RyanNeural"
+        rate = "+0%" # Increase speed for snappier response
+        communicate = edge_tts.Communicate(text, voice, rate=rate)
+        
+        # Start mpg123 reading from stdin with a small buffer for low latency
+        # -q: quiet, -: stdin, --buffer 1024: small buffer
+        cmd = ["mpg123", "-q", "--buffer", "1024", "-"]
+        
+        try:
+            self.speech_process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            
+            async for chunk in communicate.stream():
+                if self.speech_process is None: # Interrupted
+                    break
+                if chunk["type"] == "audio":
+                    try:
+                        self.speech_process.stdin.write(chunk["data"])
+                        self.speech_process.stdin.flush()
+                    except (BrokenPipeError, ValueError):
+                        # Process died or closed
+                        break
+            
+            # Close stdin to signal EOF to mpg123
+            if self.speech_process and self.speech_process.stdin:
+                try:
+                    self.speech_process.stdin.close()
+                except:
+                    pass
+            
+            # Wait for playback to finish
+            if self.speech_process:
+                self.speech_process.wait()
+                
+        except Exception as e:
+            print(f"[JARVIS] Streaming Audio Error: {e}")
+        finally:
+            self.speech_process = None
 
     def _speak_thread(self, text):
         """
         Worker thread for Edge TTS execution.
         """
         try:
-            # Create a temporary file for the audio
-            temp_file = os.path.join(os.getcwd(), "jarvis_voice_output.mp3")
-            
-            # Run the async generation in a new even loop for this thread
+            # Run the async streaming in a new event loop for this thread
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(self._generate_edge_voice(text, temp_file))
+            loop.run_until_complete(self._stream_edge_voice(text))
             loop.close()
-
-            # Play the audio file
-            # Using mpg123 for playing mp3 in terminal/linux is robust
-            if os.path.exists(temp_file):
-                # Use subproccess Popen to allow killing the process
-                proc = subprocess.Popen(["mpg123", "-q", temp_file])
-                self.speech_process = proc
-                
-                # Wait for process while checking if it's been killed externally
-                while proc.poll() is None:
-                     if self.speech_process is None: # stop_speaking was called
-                         break
-                     time.sleep(0.1)
-                
-            # Cleanup
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
                 
         except Exception as e:
             print(f"[JARVIS] Voice Error: {e}")
         finally:
-            self.is_speaking = False
             self.is_speaking = False
             self.emit_status("idle")
             self.speech_process = None
@@ -633,23 +646,76 @@ class JarvisAssistant:
             print(f"[JARVIS] Web task protocol failed: {e}")
             self.log_and_speak("There was an error with the web driver.")
 
-    def ask_ai(self, prompt, system_instruction=None, json_mode=False):
+    def load_history(self):
+        """
+        Load conversation history from JSON file.
+        """
+        if os.path.exists("conversation_history.json"):
+            try:
+                with open("conversation_history.json", "r") as f:
+                    return json.load(f)
+            except:
+                return []
+        return []
+
+    def save_history(self, entry):
+        """
+        Save a new interaction to the history file.
+        """
+        history = self.load_history()
+        history.append(entry)
+        try:
+            with open("conversation_history.json", "w") as f:
+                json.dump(history, f, indent=2)
+        except Exception as e:
+            print(f"[JARVIS] History save error: {e}")
+
+    def get_full_history(self):
+        """
+        Return a formatted string of the entire history.
+        """
+        history = self.load_history()
+        if not history:
+            return "No history records found."
+        
+        output = ["--- CONVERSATION HISTORY ---"]
+        for item in history:
+            ts = item.get("timestamp", "Unknown Time")
+            user = item.get("user", "")
+            assistant = item.get("assistant", "")
+            output.append(f"[{ts}]\nUser: {user}\nJARVIS: {assistant}\n")
+        return "\n".join(output)
+
+    def ask_ai(self, prompt, system_instruction=None, json_mode=False, include_history=False):
         """
         Send a prompt to local Ollama instance and return the AI's response.
         Arg: json_mode (bool) - If True, enforces JSON output from the model.
+        Arg: include_history (bool) - If True, appends last 4 conversation turns to context.
         """
         if not system_instruction:
             system_instruction = "You are J.A.R.V.I.S., a highly intelligent AI assistant. Keep responses concise, sophisticated, and professional."
+
+        # Prepare messages
+        messages = [{"role": "system", "content": system_instruction}]
+
+        # Inject Context (Last 4 interactions) if enabled
+        if include_history:
+            history = self.load_history()
+            recent = history[-4:] # Last 4
+            for item in recent:
+                if item.get("user"):
+                    messages.append({"role": "user", "content": item.get("user")})
+                if item.get("assistant"):
+                    messages.append({"role": "assistant", "content": item.get("assistant")})
+
+        messages.append({"role": "user", "content": prompt})
 
         # self.log_and_speak("Processing locally...")
         url = "http://localhost:11434/api/chat"
         
         data = {
             "model": self.model,
-            "messages": [
-                {"role": "system", "content": system_instruction},
-                {"role": "user", "content": prompt}
-            ],
+            "messages": messages,
             "stream": False
         }
         
@@ -696,6 +762,10 @@ class JarvisAssistant:
              
         if "list files" in command_lower or "ls" in command_lower:
              return {"action": "file", "operation": "list", "name": "."}
+
+        # History
+        if "history" in command_lower:
+            return {"action": "history", "type": "show"}
 
         # Visuals
         if "screenshot" in command_lower:
@@ -779,7 +849,9 @@ class JarvisAssistant:
         - GESTURES: {"action": "system", "type": "gesture_on" or "gesture_off"}
         - FILE OPEN: {"action": "file", "operation": "open", "name": "filename or 'latest_photo'"}
         - CHAT: {"action": "chat", "response": "Reply text"}
+        - CHAT: {"action": "chat", "response": "Reply text"}
         - ASK_AI: {"action": "ask_ai", "prompt": "User's question"}
+        - HISTORY: {"action": "history", "type": "show"}
         
         CRITICAL: For ANY action involving deleting files, removing directories, or managing system state not listed above, use the TERMINAL action. Do NOT invent new system types like 'delete'.
         
@@ -799,6 +871,8 @@ class JarvisAssistant:
         "Turn on wifi" -> {"action": "terminal", "instruction": "turn on wifi"}
         "Check disk usage" -> {"action": "terminal", "instruction": "check disk usage"}
         "List files" -> {"action": "terminal", "instruction": "list files"}
+        "Show history" -> {"action": "history", "type": "show"}
+        "What did we talk about?" -> {"action": "history", "type": "show"}
         "Update system" -> {"action": "terminal", "instruction": "update system"}
         "Set brightness to 50%" -> {"action": "brightness", "level": "50"}
         "Hello" -> {"action": "chat", "response": "Hello, Sir."}
@@ -1330,6 +1404,12 @@ class JarvisAssistant:
                 elif ctype == "gesture_off":
                     self.deactivate_gestures()
                     return "Gestures deactivated."
+
+            elif action == "history":
+                hist_text = self.get_full_history()
+                print(f"\n{hist_text}\n")
+                self.log_and_speak("History has been logged to the console.")
+                return "History displayed."
             
             elif action == "brightness":
                 level = intent.get("level", 100)
@@ -1376,8 +1456,8 @@ class JarvisAssistant:
             elif action == "ask_ai":
                 prompt = intent.get("prompt")
                 if prompt:
-                    # Direct query to the LLM (no JSON mode)
-                    response = self.ask_ai(prompt, system_instruction="You are a helpful assistant. Be concise.")
+                    # Direct query to the LLM with History Context
+                    response = self.ask_ai(prompt, system_instruction="You are a helpful assistant. Be concise.", include_history=True)
                     self.log_and_speak(response)
                     return response
 
@@ -1406,6 +1486,15 @@ class JarvisAssistant:
 
                 # Process the command
                 response = self.process_command(command)
+                
+                # Log Interaction to History
+                if response:
+                    entry = {
+                        "user": command,
+                        "assistant": str(response),
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+                    }
+                    self.save_history(entry)
                 
                 # Check for exit condition (based on the processed command)
                 if response == "Powering down system. Goodbye, Sir.":
