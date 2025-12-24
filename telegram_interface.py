@@ -70,6 +70,10 @@ class TelegramInterface:
         else:
             await context.bot.send_message(chat_id=update.effective_chat.id, text="Command processed.")
 
+    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Log Errors caused by Updates."""
+        print(f"[TELEGRAM] Error: {context.error}")
+
     def _run_bot(self):
         if not self.token:
             print("[JARVIS] Warning: TELEGRAM_BOT_TOKEN not found. Telegram interface disabled.")
@@ -88,6 +92,7 @@ class TelegramInterface:
         
         self.application.add_handler(start_handler)
         self.application.add_handler(echo_handler)
+        self.application.add_error_handler(self.error_handler)
         
         # Disable signal handling since we are in a background thread
         print("[JARVIS] Telegram Interface Initialized.")

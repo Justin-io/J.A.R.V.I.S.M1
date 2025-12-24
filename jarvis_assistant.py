@@ -738,164 +738,90 @@ class JarvisAssistant:
 
     def determine_intent(self, command):
         """
-        Analyze the user's intent. First checks a regex-based fast path.
-        If no match, falls back to the LLM.
+        Analyze the user's intent using a two-stage approach:
+        1. Fast Regex (Zero Latency) for trivial commands and common queries.
+        2. "Dual-Mode Brain" (LLM) to decide between DIRECT_ACTION and AGENTIC_FLOW.
         """
-        # 1. Fast Path (Bypass LLM for speed)
+        # --- STAGE 1: FAST REGEX (ZERO LATENCY) ---
         command_lower = command.lower().strip()
         
         # Volume
-        if any(w in command_lower for w in ["volume up", "louder", "turn it up"]):
-            return {"action": "volume", "type": "up"}
-        if any(w in command_lower for w in ["volume down", "quieter", "turn it down", "lower output"]):
-            return {"action": "volume", "type": "down"}
-        if any(w in command_lower for w in ["mute", "silent", "silence", "stop", "shh", "quiet", "cancel", "shut up"]):
-            self.stop_speaking() # Immediate kill
-            if "stop" in command_lower or "cancel" in command_lower or "shut up" in command_lower:
-                return {"action": "chat", "response": "Listening."} # Acknowledge stop
-            return {"action": "volume", "type": "mute"}
-            
-        # Files (Priority over Visuals so 'delete image' logic works)
-        if "delete" in command_lower or "remove" in command_lower:
-             # Route purely to terminal for deletion tasks to avoid 'shutdown' hallucination
-             return {"action": "terminal", "instruction": command_lower}
-             
-        if "list files" in command_lower or "ls" in command_lower:
-             return {"action": "file", "operation": "list", "name": "."}
+        if any(w in command_lower for w in ["volume", "louder", "quieter", "mute", "silent"]):
+             if "up" in command_lower or "louder" in command_lower: return {"action": "volume", "type": "up"}
+             if "down" in command_lower or "quieter" in command_lower: return {"action": "volume", "type": "down"}
+             if "mute" in command_lower or "silent" in command_lower: return {"action": "volume", "type": "mute"}
 
-        # History
-        if "history" in command_lower:
-            return {"action": "history", "type": "show"}
-
-        # Visuals
-        if "screenshot" in command_lower:
-            if "delete" in command_lower:
-                 return {"action": "screenshot", "sub_action": "delete_latest"}
-            if "telegram" in command_lower or "send" in command_lower:
-                 return {"action": "telegram", "sub_action": "send_latest_screenshot"}
-            return {"action": "screenshot", "sub_action": "take"}
-            
-        if any(w in command_lower for w in ["photo", "picture", "selfie", "camera", "image", "visual"]):
-            if "open" in command_lower or "show" in command_lower:
-                if any(w in command_lower for w in ["camera", "live"]):
-                     # Usually means launch camera app
-                     return {"action": "app", "name": "cheese"} # Common linux camera app
-                return {"action": "file", "operation": "open", "name": "latest_photo"}
-            
-            if "take" in command_lower or "capture" in command_lower:
-                 return {"action": "camera", "sub_action": "take_photo"}
-            
-            return {"action": "camera", "sub_action": "take_photo"}
+        # Stop
+        if any(w in command_lower for w in ["stop", "cancel", "shh", "wait"]):
+             self.stop_speaking()
+             return {"action": "chat", "response": "Standing by."}
 
         # System
-        if any(w in command_lower for w in ["shutdown system", "power off", "quit program", "exit jarvis"]):
-            return {"action": "system", "type": "shutdown"}
-        if "brightness" in command_lower:
-            # Extract number
-            import re
-            nums = re.findall(r'\d+', command_lower)
-            level = nums[0] if nums else "50"
-            return {"action": "brightness", "level": str(level)}
+        if any(w in command_lower for w in ["shutdown", "quit program", "exit jarvis"]):
+             return {"action": "system", "type": "shutdown"}
 
-        # Apps
+        # Identity / Chat (catch common phrasing to avoid 'agentic' loop for simple questions)
+        if any(p in command_lower for p in ["who are you", "what is your name", "hello", "hi jarvis", "are you there"]):
+             prompt = f"Reply to the user command: '{command}'. Be concise and in character as JARVIS."
+             return {"action": "ask_ai", "prompt": prompt}
+
+        # Apps (Regex heuristic)
         if command_lower.startswith("open ") or command_lower.startswith("launch "):
-            app_name = command_lower.replace("open ", "").replace("launch ", "").strip()
-            # Catch "the photo" special case early
-            if app_name in ["photo", "picture", "image", "latest photo"]:
-                 return {"action": "file", "operation": "open", "name": "latest_photo"}
-            return {"action": "app", "name": app_name}
-            
-        # Web
-        if "google" in command_lower or "search for" in command_lower or "search" in command_lower:
-            query = command_lower.replace("search for", "").replace("search", "").replace("google", "").strip()
-            return {"action": "web", "type": "search", "query": query}
-            
-        # Files (Moved up)
-             
-        # Gestures
-        if "gesture" in command_lower:
-            if "on" in command_lower or "activate" in command_lower:
-                return {"action": "system", "type": "gesture_on"}
-            if "off" in command_lower or "deactivate" in command_lower or "stop" in command_lower:
-                return {"action": "system", "type": "gesture_off"}
+             app_name = command_lower.replace("open ", "").replace("launch ", "").strip()
+             return {"action": "app", "name": app_name}
 
-        # Fallback to Terminal for simple "turn on/off" things not covered by system
-        if "turn on" in command_lower or "turn off" in command_lower:
-            # This is faster than LLM for simple toggles
-            return {"action": "terminal", "instruction": command_lower}
-
-        # Common Q&A Patterns (Fast Path to ASK_AI)
-        qa_triggers = ["what is", "who is", "define", "how to", "tell me", "explain", "write a"]
-        if any(command_lower.startswith(t) for t in qa_triggers):
-             return {"action": "ask_ai", "prompt": command}
-
-        # 2. Slow Path (LLM) - Only for unknown queries
-        self.log_and_speak("Analyzing complex request...") # Re-enable log for slow path so user knows why it's waiting
+        # --- STAGE 2: THE BRAIN (LLM ROUTER) ---
+        self.emit_log("Neural Engine: Routing Request...")
+        
+        # Simplified Prompt for 1B/3B Models
         system_prompt = """
-        You are an intent classifier. Map the user's command to the most appropriate JSON object from the list below.
-        
-        Supported Actions:
-        - SCREENSHOT: {"action": "screenshot", "sub_action": "take"}
-        - CAMERA: {"action": "camera", "sub_action": "take_photo"}
-        - DELETE LAST SCREENSHOT: {"action": "screenshot", "sub_action": "delete_latest"}
-        - SEND SCREENSHOT TO TELEGRAM: {"action": "telegram", "sub_action": "send_latest_screenshot"}
-        - WEB SEARCH: {"action": "web", "type": "search", "query": "search terms"}
-        - WEB INTEL: {"action": "web", "type": "scrape", "url": "http://url..."}
-        - OPEN APP: {"action": "app", "name": "app name"}
-        - SYSTEM HEALTH: {"action": "system", "type": "health"}
-        - SYSTEM SHUTDOWN: {"action": "system", "type": "shutdown"} (ONLY for power off/reboot/quit)
-        - BRIGHTNESS: {"action": "brightness", "level": "50"}
-        - TERMINAL: {"action": "terminal", "instruction": "instruction"} (Use for delete, wifi, open files, ping, updates, etc.)
-        - GESTURES: {"action": "system", "type": "gesture_on" or "gesture_off"}
-        - FILE OPEN: {"action": "file", "operation": "open", "name": "filename or 'latest_photo'"}
-        - CHAT: {"action": "chat", "response": "Reply text"}
-        - CHAT: {"action": "chat", "response": "Reply text"}
-        - ASK_AI: {"action": "ask_ai", "prompt": "User's question"}
-        - HISTORY: {"action": "history", "type": "show"}
-        
-        CRITICAL: For ANY action involving deleting files, removing directories, or managing system state not listed above, use the TERMINAL action. Do NOT invent new system types like 'delete'.
-        
-        Examples:
-        "Delete the images" -> {"action": "terminal", "instruction": "delete all images in current folder"}
-        "Remove temporary files" -> {"action": "terminal", "instruction": "remove temporary files"}
-        "Who is the president?" -> {"action": "ask_ai", "prompt": "Who is the president?"}
-        "Write a poem" -> {"action": "ask_ai", "prompt": "Write a poem"}
-        "Take a screenshot" -> {"action": "screenshot", "sub_action": "take"}
-        "Send to telegram" -> {"action": "telegram", "sub_action": "send_latest_screenshot"}
-        "Search Google for cats" -> {"action": "web", "type": "search", "query": "cats"}
-        "Open calculator" -> {"action": "app", "name": "calculator"}
-        "Quit" -> {"action": "system", "type": "shutdown"}
-        "Open calculator" -> {"action": "app", "name": "calculator"}
-        "Quit" -> {"action": "system", "type": "shutdown"}
-        "Turn off the computer" -> {"action": "system", "type": "shutdown"}
-        "Turn on wifi" -> {"action": "terminal", "instruction": "turn on wifi"}
-        "Check disk usage" -> {"action": "terminal", "instruction": "check disk usage"}
-        "List files" -> {"action": "terminal", "instruction": "list files"}
-        "Show history" -> {"action": "history", "type": "show"}
-        "What did we talk about?" -> {"action": "history", "type": "show"}
-        "Update system" -> {"action": "terminal", "instruction": "update system"}
-        "Set brightness to 50%" -> {"action": "brightness", "level": "50"}
-        "Hello" -> {"action": "chat", "response": "Hello, Sir."}
-        "Can you hear me?" -> {"action": "chat", "response": "Loud and clear, Sir."}
-        "Are you there?" -> {"action": "chat", "response": "I am always here."}
-        "Who are you?" -> {"action": "chat", "response": "I am J.A.R.V.I.S."}
-        
-        Respond with ONLY the JSON object.
+        You are the JSON Router for an AI Assistant.
+        Classify the COMMAND into:
+        - "direct": Simple tasks (Weather, Jokes, Facts, Web Search).
+        - "agentic": Complex tasks (System updates, coding, files, unknown).
+
+        OUTPUT JSON:
+        {"mode": "direct", "action": "chat|ask_ai|web|screenshot", "payload": "..."}
+        OR
+        {"mode": "agentic", "goal": "..."}
+
+        EXAMPLES:
+        "Time in Paris?" -> {"mode": "direct", "action": "ask_ai", "payload": "Time in Paris"}
+        "Search cats" -> {"mode": "direct", "action": "web", "payload": {"type": "search", "query": "cats"}}
+        "Taking a screenshot" -> {"mode": "direct", "action": "screenshot", "payload": "take"}
+        "Update linux" -> {"mode": "agentic", "goal": "Update linux"}
         """
         
         try:
-            # Enable JSON mode to force structured output
-            response = self.ask_ai(command, system_instruction=system_prompt, json_mode=True)
+            response = self.ask_ai(command, system_instruction=system_prompt, json_mode=True, include_history=True)
+            intent = json.loads(response)
             
-            # Basic cleanup just in case
-            clean_json = response.replace("```json", "").replace("```", "").strip()
-            return json.loads(clean_json)
-        except json.JSONDecodeError:
-            print(f"[JARVIS] Intent parsing failed. Raw: {response}")
-            return {"action": "chat", "response": str(response)}
+            # Normalize legacy actions to keep process_command simple
+            if intent.get("mode") == "direct":
+                act = intent.get("action")
+                payload = intent.get("payload")
+                
+                # Mapper
+                if act == "chat": return {"action": "chat", "response": payload}
+                if act == "ask_ai": return {"action": "ask_ai", "prompt": payload}
+                if act == "web": 
+                    if isinstance(payload, dict):
+                         return {"action": "web", "type": payload.get("type"), "query": payload.get("query")}
+                    return {"action": "web", "type": "search", "query": payload}
+                if act == "screenshot": return {"action": "screenshot", "sub_action": "take"}
+                
+                # Unknown Direct Fallback
+                return {"action": "ask_ai", "prompt": command}
+            
+            elif intent.get("mode") == "agentic":
+                return {"action": "agentic", "goal": intent.get("goal") or command}
+                
+            # Default
+            return {"action": "ask_ai", "prompt": command}
+
         except Exception as e:
-            print(f"[JARVIS] Intent Error: {e}")
-            return {"action": "chat", "response": "Internal processing error."}
+            print(f"[JARVIS] Router Error: {e}")
+            return {"action": "ask_ai", "prompt": command}
 
     def engage_desktop_mode(self, app_name):
         """
@@ -1088,145 +1014,118 @@ class JarvisAssistant:
             self.log_and_speak("I encountered a critical error.")
             return str(e)
 
-    def agentic_terminal_action(self, instruction, max_steps=10):
+    def get_device_info(self):
         """
-        Autonomous Agent Loop (ReAct / Chain of Thought).
-        1. Analyze context
-        2. Decide next step
-        3. Execute visual command
-        4. Learn from output
-        5. Repeat until DONE
+        Gather OS and System Information for context.
         """
-        self.log_and_speak("Analyzing task requirements...")
-        history = ""
+        import platform
+        try:
+            info = f"OS: {platform.system()} {platform.release()}\n"
+            info += f"Distro: {subprocess.check_output('cat /etc/*release | grep PRETTY_NAME', shell=True).decode().strip()}"
+        except:
+            info = f"OS: {platform.system()} (Unknown Distro)"
+        return info
+
+    def agentic_terminal_action(self, goal, max_steps=10):
+        """
+        Robust Agentic Loop handling commands, GUI, and simple communication.
+        """
+        self.log_and_speak(f"Agentic Mode Engaged. Goal: {goal}")
         
-        for step in range(max_steps):
-            # 1. Decide NEXT Step via AI
-            self.emit_log("Neural Engine: Analyzing next step...")
-            import getpass
-            current_user = getpass.getuser()
-            
-            prompt = f"""
-            You are J.A.R.V.I.S., an Expert Linux System Administrator on Parrot OS.
-            GOAL: "{instruction}"
-            
-            HISTORY OF ACTIONS:
-            {history if history else "(No actions yet)"}
-            
-            CONTEXT:
-            - User: {current_user} (You are NOT root by default)
-            - Directory: {os.getcwd()}
-            
-            INSTRUCTIONS:
-            - Decide the NEXT SINGLE bash command.
-            - MODE SELECTION:
-              - Standard commands (ls, cat, whoami, check internet): System acts silently.
-              - Interactive commands (sudo, apt install, ssh): System acts VISUALLY (user creates password).
-            - FOR GUI APPS: ALWAYS use 'nohup app_name > /dev/null 2>&1 &'
-            - OUTPUT FORMAT:
-              You MUST wrap the command in [COMMAND]...[/COMMAND] tags.
-              Example: [COMMAND]ls -la[/COMMAND]
-              Example: [COMMAND]nohup firefox > /dev/null 2>&1 &[/COMMAND]
-              If task is done, output: [COMMAND]DONE[/COMMAND]
-            """
-            
-            raw_response = self.ask_ai(prompt)
-            if not raw_response:
-                continue
-                
-            # --- ROBUST CLEANING ---
-            # Extract content between [COMMAND] and [/COMMAND]
-            import re
-            match = re.search(r'\[COMMAND\](.*?)\[/COMMAND\]', raw_response, re.DOTALL)
-            
-            if match:
-                cmd = match.group(1).strip()
-            else:
-                # Fallback: legacy cleaning if tags missed (unlikely but safe)
-                lines = raw_response.split('\n')
-                clean_lines = []
-                for line in lines:
-                    line = line.replace("```bash", "").replace("```", "").replace("`", "").strip()
-                    if line.startswith("CMD:"): line = line[4:].strip()
-                    if line.startswith("Command:"): line = line[8:].strip()
-                    if line.startswith("Status:") or line.startswith("Output:") or line.startswith("Step"): continue
-                    if not line: continue
-                    clean_lines.append(line)
-                
-                if not clean_lines:
-                     continue
-                cmd = "\n".join(clean_lines)
+        history = "" 
+        import getpass
+        import json
+        current_user = getpass.getuser()
+        
+        for step_i in range(1, max_steps + 1):
+             
+             # Few-shot example-driven prompt for small models
+             system_prompt = f"""
+Goal: {goal}
+Step: {step_i}
 
-            # Extra cleanup for 'MODE SELECTION' leakage
-            cmd_lines = cmd.split('\n')
-            final_cmd_lines = []
-            for l in cmd_lines:
-                 if "MODE SELECTION" in l or "System will act" in l:
-                     continue
-                 final_cmd_lines.append(l)
-            cmd = "\n".join(final_cmd_lines).strip()
-            
-            if not cmd:
-                continue
+Recent actions:
+{history[-300:] if history else "None"}
 
-            # Check for completion
-            if "DONE" in cmd:
-                self.log_and_speak("Task verified complete.")
-                return f"Task Completed.\nHistory:\n{history}"
-            
-            # Safety checks
-            if "rm -rf /" in cmd:
-                return "Safety violation prevented."
+Examples of valid responses:
 
-            # 2. Decide Execution Mode
-            # Heuristic: If prompt contains 'sudo' or 'ssh' or 'password', force VISUAL.
-            # Otherwise, use SILENT for speed.
-            
-            output = ""
-            exit_code = 0
-            
-            # Check for explicitly visual commands or AI tags
-            is_visual = False
-            if "sudo " in cmd or "ssh " in cmd or "apt" in cmd or "VISUAL" in cmd:
-                is_visual = True
-            
-            if is_visual:
-                self.log_and_speak(f"Visual Step {step+1}: {cmd}")
-                output, exit_code = self.execute_visible_command(cmd, timeout=300) # Long timeout for interactive
-            else:
-                self.log_and_speak(f"Step {step+1}: {cmd}")
-                # Fast Silent Execution
-                try:
-                    res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
-                    output = res.stdout.strip()
-                    exit_code = res.returncode
-                    if res.stderr.strip():
-                        output += f"\nSTDERR: {res.stderr.strip()}"
-                except subprocess.TimeoutExpired:
-                    output = "Command timed out (running in background?)"
-                    exit_code = 0
-                except Exception as e:
-                    output = str(e)
-                    exit_code = 1
-            
-            # 3. Update History
-            status = "SUCCESS" if exit_code == 0 else f"FAILED (Code {exit_code})"
-            preview = output[:300] + "..." if len(output) > 300 else output
-            
-            history += f"\n--- Step {step+1} ({'VISUAL' if is_visual else 'SILENT'}) ---\nCmd: {cmd}\nStatus: {status}\nOutput: {preview}\n"
-            
-            # Show output to user
-            if preview:
-                self.emit_log(f"Output: {preview}")
-            
-            # Check for background success
-            if "&" in cmd and exit_code == 0:
-                 self.log_and_speak("Launched.")
-            
-            if exit_code != 0:
-                 self.log_and_speak("Command failed. Retrying...")
-            
-        return "Task halted (max steps reached)."
+To launch Chrome:
+Step 1: {{"thought": "open terminal", "type": "gui", "value": "hotkey:ctrl+alt+t"}}
+Step 2: {{"thought": "type chrome command", "type": "gui", "value": "type:google-chrome"}}
+Step 3: {{"thought": "execute", "type": "gui", "value": "press:enter"}}
+Step 4: {{"thought": "done", "type": "done", "value": "true"}}
+
+To check wifi:
+Step 1: {{"thought": "open terminal", "type": "gui", "value": "hotkey:ctrl+alt+t"}}
+Step 2: {{"thought": "type wifi command", "type": "gui", "value": "type:nmcli device wifi list"}}
+Step 3: {{"thought": "execute", "type": "gui", "value": "press:enter"}}
+Step 4: {{"thought": "done", "type": "done", "value": "true"}}
+
+Your turn. Output ONLY JSON for step {step_i}:
+             """
+             
+             # Get AI decision
+             response = self.ask_ai("Generate next action", system_instruction=system_prompt, include_history=False, json_mode=True)
+             
+             try:
+                 data = json.loads(response)
+                 thought = data.get("thought", "Processing...")
+                 action_type = data.get("type", "").lower()
+                 action_val = data.get("value", "")
+             except Exception as e:
+                 self.emit_log(f"JSON Parse Error: {response[:100]}")
+                 continue
+
+             self.emit_log(f"Step {step_i}: {thought}")
+             
+             # Handle Execution
+             if action_type == "done":
+                 self.log_and_speak("Task complete.")
+                 return "Task Completed."
+
+             elif action_type == "gui" and action_val:
+                 try:
+                     if ":" not in action_val:
+                         self.emit_log(f"Invalid GUI value format: {action_val}")
+                         continue
+                         
+                     parts = action_val.split(":", 1)
+                     act = parts[0].lower().strip()
+                     val = parts[1].strip()
+                     
+                     if act == "hotkey":
+                         keys = val.split("+")
+                         self.emit_log(f"Pressing: {' + '.join(keys)}")
+                         pyautogui.hotkey(*keys)
+                         time.sleep(2.0)
+                         history += f"\n[{step_i}] Hotkey: {val}"
+                         
+                     elif act == "type":
+                         self.emit_log(f"Typing: {val[:50]}...")
+                         pyautogui.write(val, interval=0.05)
+                         time.sleep(0.5)
+                         history += f"\n[{step_i}] Typed: {val}"
+                         
+                     elif act == "press":
+                         self.emit_log(f"Pressing key: {val}")
+                         pyautogui.press(val)
+                         time.sleep(0.5)
+                         history += f"\n[{step_i}] Pressed: {val}"
+                     else:
+                         self.emit_log(f"Unknown GUI action: {act}")
+                         
+                 except Exception as e:
+                     self.emit_log(f"GUI Error: {e}")
+                     history += f"\n[{step_i}] Error: {e}"
+             
+             else:
+                 self.emit_log(f"Invalid action type: {action_type}")
+                 history += f"\n[{step_i}] Invalid: {thought}"
+
+             time.sleep(1.0)
+
+        self.log_and_speak("Step limit reached.")
+        return "Step limit reached."
 
     def execute_visible_command(self, command, timeout=30):
         """
@@ -1331,6 +1230,10 @@ class JarvisAssistant:
             
             self.emit_log(f"Identified Intent: {intent.get('action')}")
             print(f"[JARVIS] Identified Intent: {intent}")
+
+            if action == "agentic":
+                goal = intent.get("goal")
+                return self.agentic_terminal_action(goal)
 
             if action == "screenshot":
                 sub = intent.get("sub_action")
