@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 *.log
 *.wav
+conversation_history.json
