@@ -23,6 +23,10 @@ from contextlib import contextmanager
 import shutil
 from dotenv import load_dotenv
 from gesture_control import HandGestureController
+from piper import PiperVoice
+from piper.config import SynthesisConfig
+import vosk
+vosk.SetLogLevel(-1) # Silence Kaldi/Vosk logs
 
 # Load environment variables from .env file
 load_dotenv()
@@ -69,17 +73,34 @@ class JarvisAssistant:
         self.is_speaking = False
         self.last_created_item = None # Context for "that folder"
         
+        # Initialize Speech Queue and Background Worker
+        self.speech_queue = []
+        self.speech_worker_thread = threading.Thread(target=self._speech_worker, daemon=True)
+        self.speech_worker_thread.start()
+        
         # Initialize Text-to-Speech
         try:
             self.engine = pyttsx3.init()
             self.set_voice_config()
         except Exception as e:
-            print(f"[JARVIS] Warning: TTS Engine failed to initialize: {e}")
+            print(f"[jarvis] Warning: TTS Engine failed to initialize: {e}")
             self.engine = None
+        
+        # Initialize Piper TTS
+        try:
+            model_path = "/home/justin/Desktop/jarvis_project/piper_tts/jarvis.onnx"
+            # We assume the config .json is in the same folder with .json extension appended
+            self.piper_voice = PiperVoice.load(model_path)
+            print("[jarvis] Piper Neural TTS Initialized.")
+        except Exception as e:
+            print(f"[jarvis] Warning: Piper TTS failed to initialize: {e}")
+            self.piper_voice = None
         
         # Initialize Speech Recognition
         self.recognizer = sr.Recognizer()
-        self.speech_process = None # Handle for the TTS process
+        self.recognizer.energy_threshold = 5000
+        self.recognizer.pause_threshold = 0.6
+        self.speech_process = None 
         
         # Check dependencies for health monitoring
         try:
@@ -87,12 +108,9 @@ class JarvisAssistant:
             self.psutil = psutil
         except ImportError:
             self.psutil = None
-            print("[JARVIS] Warning: 'psutil' module not found. Health monitoring disabled.")
+            print("[jarvis] Warning: 'psutil' module not found. Health monitoring disabled.")
 
-        if self.psutil:
-            self.monitor_thread = threading.Thread(target=self.monitor_system, daemon=True)
-            self.monitor_thread.start()
-        
+        # Initialize Gesture Controller
         self.gesture_controller = HandGestureController()
         
         # State tracking for deduplication
@@ -104,32 +122,20 @@ class JarvisAssistant:
         except Exception:
             self.microphone = sr.Microphone() # Fallback
 
-        # OpenRouter Configuration
-        self.api_key = os.getenv("OPENROUTER_API_KEY") # Kept for potential fallback, unused in offline mode
+        self.session = requests.Session()
         self.model = "llama3.2:1b"
+        self.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         
         # Startup Sequence
-        # self.log_and_speak("Initializing systems...")
-        # time.sleep(0.5)
-        print("[JARVIS] Loading core modules...")
-        # time.sleep(0.5)
-        # time.sleep(0.5)
+        print("[jarvis] Loading core modules...")
         self.emit_log("Connecting to satellite network...")
-        # time.sleep(0.5)
         self.log_and_speak("Systems Online.")
         
         # Start Background Health Monitor
         if self.psutil:
             self.monitor_thread = threading.Thread(target=self.monitor_system, daemon=True)
             self.monitor_thread.start()
-            
-        # Initialize Gesture Controller
-        self.gesture_controller = HandGestureController()
-        
-        # Telegram Integration Context
-        self.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
 
-        # Start Telemetry Loop for UI
         if self.psutil:
              self.telemetry_thread = threading.Thread(target=self.telemetry_loop, daemon=True)
              self.telemetry_thread.start()
@@ -144,8 +150,8 @@ class JarvisAssistant:
                 if stats and self.event_callback:
                     self.event_callback('system_stats', stats)
             except Exception as e:
-                print(f"[JARVIS] Telemetry Error: {e}")
-            time.sleep(2)
+                print(f"[jarvis] Telemetry Error: {e}")
+            time.sleep(5)
 
     def emit_status(self, status):
         """Emit a status update to the UI."""
@@ -176,13 +182,13 @@ class JarvisAssistant:
             self.log_and_speak("Transmission successful.")
             return "Screenshot sent to Telegram."
         except Exception as e:
-            print(f"[JARVIS] Telegram Upload Error: {e}")
+            print(f"[jarvis] Telegram Upload Error: {e}")
             self.log_and_speak("Upload failed due to network interference.")
             return f"Error: {e}"
 
     def emit_log(self, message, user=False):
         """Emit a log message to the UI and Print to Terminal."""
-        prefix = "JUSTIN" if user else "JARVIS"
+        prefix = "JUSTIN" if user else "jarvis"
         print(f"[{prefix}] {message}")
         if self.event_callback:
             self.event_callback('new_log', {'message': message, 'type': 'user' if user else 'system'})
@@ -205,34 +211,33 @@ class JarvisAssistant:
         self.engine.setProperty('rate', 160)
         self.engine.setProperty('volume', 1.0)
 
-    async def _stream_edge_voice(self, text):
+    def _stream_piper_voice(self, text):
         """
-        Generate and stream voice using Edge TTS directly to mpg123.
-        Reduces latency (TTFB) significantly by playing chunks as they arrive.
+        Generate and stream voice using Piper TTS directly to aplay.
         """
-        voice = "en-GB-RyanNeural"
-        rate = "+0%" # Increase speed for snappier response
-        communicate = edge_tts.Communicate(text, voice, rate=rate)
-        
-        # Start mpg123 reading from stdin with a small buffer for low latency
-        # -q: quiet, -: stdin, --buffer 1024: small buffer
-        cmd = ["mpg123", "-q", "--buffer", "1024", "-"]
+        if not self.piper_voice:
+             print("[jarvis] Piper Voice not loaded. Fallback to print.")
+             return
+
+        # Prepare aplay command for raw 16-bit 22050Hz mono audio
+        cmd = ["aplay", "-r", "22050", "-f", "S16_LE", "-t", "raw", "-"]
         
         try:
             self.speech_process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
             
-            async for chunk in communicate.stream():
+            # Synthesize and stream directly to aplay's stdin
+            # length_scale=1.05 for a slightly more sophisticated, deliberate tone
+            config = SynthesisConfig(length_scale=1.05)
+            for chunk in self.piper_voice.synthesize(text, syn_config=config):
                 if self.speech_process is None: # Interrupted
                     break
-                if chunk["type"] == "audio":
-                    try:
-                        self.speech_process.stdin.write(chunk["data"])
-                        self.speech_process.stdin.flush()
-                    except (BrokenPipeError, ValueError):
-                        # Process died or closed
-                        break
+                try:
+                    self.speech_process.stdin.write(chunk.audio_int16_bytes)
+                    self.speech_process.stdin.flush()
+                except (BrokenPipeError, ValueError):
+                    break
             
-            # Close stdin to signal EOF to mpg123
+            # Close stdin to signal EOF
             if self.speech_process and self.speech_process.stdin:
                 try:
                     self.speech_process.stdin.close()
@@ -244,7 +249,7 @@ class JarvisAssistant:
                 self.speech_process.wait()
                 
         except Exception as e:
-            print(f"[JARVIS] Streaming Audio Error: {e}")
+            print(f"[jarvis] Piper Audio Error: {e}")
         finally:
             self.speech_process = None
 
@@ -253,18 +258,19 @@ class JarvisAssistant:
         Worker thread for Edge TTS execution.
         """
         try:
-            # Run the async streaming in a new event loop for this thread
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(self._stream_edge_voice(text))
-            loop.close()
+            if self.piper_voice:
+                self._stream_piper_voice(text)
+            elif self.engine:
+                # Fallback to pyttsx3
+                self.engine.say(text)
+                self.engine.runAndWait()
+            else:
+                print(f"[jarvis] Fallback: {text}")
                 
         except Exception as e:
-            print(f"[JARVIS] Voice Error: {e}")
+            print(f"[jarvis] Voice Error: {e}")
         finally:
-            self.is_speaking = False
-            self.emit_status("idle")
-            self.speech_process = None
+            pass # worker handles status
 
     def check_for_interrupt(self):
         """
@@ -291,57 +297,61 @@ class JarvisAssistant:
         except:
             return False
 
+    def _speech_worker(self):
+        """Background thread to process the speech queue sequentially."""
+        while True:
+            text = None
+            with self.lock:
+                if self.speech_queue:
+                    text = self.speech_queue.pop(0)
+            
+            if text:
+                self.is_speaking = True
+                self.emit_status("speaking")
+                self._stream_piper_voice(text)
+                self.is_speaking = False
+                self.emit_status("idle")
+            else:
+                time.sleep(0.1)
+
     def log_and_speak(self, text):
         """
-        Print to console and speak the text using Edge TTS.
+        Print to console and queue the text for speech output.
         """
-        # Ensure only one thread speaks at a time
-        with self.lock:
-            self.emit_log(text)
-            
-            # Check for silent mode (e.g. from Telegram)
-            if getattr(self.thread_local, 'silent', False):
-                return
-            
-            # Anti-Echo: Prevent speaking the exact same phrase twice in < 2 seconds
-            # This happens if multiple threads trigger logic or UI updates fast
-            current_time = time.time()
-            if text == self.last_spoken_text and (current_time - self.last_spoken_time) < 2.0:
-                 print(f"[JARVIS] Suppression: Skipping duplicate speech '{text}'")
-                 return
-            
-            self.last_spoken_text = text
-            self.last_spoken_time = current_time
+        self.emit_log(text)
+        
+        # Check for silent mode (e.g. from Telegram)
+        if getattr(self.thread_local, 'silent', False):
+            return
+        
+        # Anti-Echo: Prevent speaking the exact same phrase twice in < 2 seconds
+        current_time = time.time()
+        if text == self.last_spoken_text and (current_time - self.last_spoken_time) < 2.0:
+             return
+        
+        self.last_spoken_text = text
+        self.last_spoken_time = current_time
 
-            self.stop_speaking() # Stop any previous speech
-            
-            self.emit_status("speaking")
-            self.is_speaking = True
-            
-            # Start speaking in a separate thread
-            # We do NOT join() here. We let it run in background.
-            # This prevents the "STUCK" frozen state.
-            t = threading.Thread(target=self._speak_thread, args=(text,))
-            t.start()
-            
-            # Note: Since we are not blocking, the main loop will immediately continue to 'listen()'
-            # If 'listen()' hears 'stop', we must handle that in 'process_command'.
+        with self.lock:
+            self.speech_queue.append(text)
 
     def stop_speaking(self):
         """
-        Immediately terminates the speech process if running.
+        Immediately terminates the speech process and clears the queue.
         """
-        self.is_speaking = False
+        with self.lock:
+            self.speech_queue.clear()
+        
         if self.speech_process:
             try:
                 self.speech_process.terminate()
-                self.speech_process.kill() # Force kill to be sure
-                print("[JARVIS] Speech output terminated by user.")
+                self.speech_process.kill()
             except Exception as e:
-                print(f"[JARVIS] Error stopping speech: {e}")
+                print(f"[jarvis] Error stopping speech: {e}")
             finally:
                 self.speech_process = None
         
+        self.is_speaking = False
         self.emit_status("idle")
 
 
@@ -401,7 +411,7 @@ class JarvisAssistant:
         try:
             subprocess.run(["notify-send", title, message], check=False)
         except Exception as e:
-            print(f"[JARVIS] Notification error: {e}")
+            print(f"[jarvis] Notification error: {e}")
 
     def set_brightness(self, level_percent):
         """
@@ -424,7 +434,7 @@ class JarvisAssistant:
             self.log_and_speak(f"Display brightness set to {level_percent} percent.")
             
         except Exception as e:
-            print(f"[JARVIS] Brightness error: {e}")
+            print(f"[jarvis] Brightness error: {e}")
             self.log_and_speak("Brightness control failed.")
 
     def control_volume(self, command):
@@ -443,7 +453,7 @@ class JarvisAssistant:
                 subprocess.run(["amixer", "-D", "pulse", "sset", "Master", "toggle"], check=False)
                 self.log_and_speak("Audio output toggled.")
         except Exception as e:
-            print(f"[JARVIS] Volume control error: {e}")
+            print(f"[jarvis] Volume control error: {e}")
             self.log_and_speak("I cannot access audio controls.")
 
     def report_health(self):
@@ -458,7 +468,7 @@ class JarvisAssistant:
             return
 
         issues = []
-        if 'battery' in stats and stats['battery'] < 20 and not stats.get('plugged'):
+        if 'battery' in stats and stats['battery'] < 30 and not stats.get('plugged'):
             issues.append(f"Battery level critical at {stats['battery']} percent.")
             if 'time_left' in stats:
                 issues.append(f"Estimated time remaining: {stats['time_left']}.")
@@ -491,19 +501,19 @@ class JarvisAssistant:
                     msg_parts = []
                     
                     # Check Battery
-                    if 'battery' in stats and stats['battery'] < 15 and not stats.get('plugged'):
+                    if 'battery' in stats and stats['battery'] < 25 and not stats.get('plugged'):
                         alert_needed = True
                         msg_parts.append(f"Critical power level: {stats['battery']} percent.")
                     
                     # Check Temp
-                    if 'temp' in stats and stats['temp'] > 85:
+                    if 'temp' in stats and stats['temp'] > 75:
                         alert_needed = True
                         msg_parts.append(f"Caution: System overheating at {stats['temp']} degrees.")
                         
                     # Check CPU
-                    if 'cpu' in stats and stats['cpu'] > 95:
+                    if 'cpu' in stats and stats['cpu'] > 98:
                          alert_needed = True
-                         msg_parts.append(f"High CPU load detected: {stats['cpu']} percent.")
+                         msg_parts.append(f"System stress detected: {stats['cpu']} percent.")
 
                     # Check Memory
                     if 'memory' in stats and stats['memory'] > 95:
@@ -519,7 +529,7 @@ class JarvisAssistant:
                         continue
 
             except Exception as e:
-                print(f"[JARVIS] Monitor error: {e}")
+                print(f"[jarvis] Monitor error: {e}")
             
             # Check every minute
             time.sleep(60)
@@ -540,35 +550,48 @@ class JarvisAssistant:
              # Apply suppression when opening the microphone stream
              with no_alsa_err():
                  with sr.Microphone(device_index=mic_index) as source:
-                    # print("\n[JARVIS] Listening...") # using emit_log
+                    # print("\n[jarvis] Listening...") # using emit_log
                     self.emit_status("listening")
                     self.emit_log("Listening...")
                     
                     # Disable dynamic thresholding to avoid calibration errors
-                    self.recognizer.dynamic_energy_threshold = False
-                    self.recognizer.energy_threshold = 3000
-                    # print(f"[JARVIS] Energy Threshold fixed to: {self.recognizer.energy_threshold}") # redundant
+                    self.recognizer.pause_threshold = 0.6 # Faster turnaround
+                    self.recognizer.energy_threshold = 5000
                     
                     # Listen
                     try:
-                        audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=8)
+                        audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=10)
                     except sr.WaitTimeoutError:
                         return None
                 
              self.emit_status("processing")
              self.emit_log("Processing...")
-             # print("[JARVIS] Processing...") # already emitted above
-             
+             # print("[jarvis] Processing...") # already emitted above
              try:
-                 command = self.recognizer.recognize_google(audio).lower()
-                 self.emit_log(f"Heard: '{command}'", user=True)
-                 # print(f"[JUSTIN] {command}") # emit_log handles this now
+                 command = ""
+                 # Try Vosk if model exists
+                 if os.path.exists("vosk_model"):
+                     self.emit_log("Neural Core: Local Recognition...")
+                     try:
+                         res = self.recognizer.recognize_vosk(audio)
+                         if res:
+                             command = json.loads(res).get("text", "").lower()
+                     except Exception:
+                         # Fallback to Google if Vosk fails or returns bad JSON
+                         command = self.recognizer.recognize_google(audio).lower()
+                 else:
+                     command = self.recognizer.recognize_google(audio).lower()
                  
+                 if not command or not command.strip():
+                     return None
+                 
+                 self.emit_log(f"Heard: '{command}'", user=True)
+
                  # Check for STOP command immediately
                  if command in ["stop", "silence", "shh", "quiet"]:
                      self.stop_speaking()
                      self.emit_log("Command: STOP")
-                     return None # Return None as no command was processed
+                     return None
                  
                  if command.startswith("jarvis"):
                      command = command.replace("jarvis", "").strip()
@@ -582,20 +605,20 @@ class JarvisAssistant:
                  return command
              except sr.UnknownValueError:
                  self.emit_log("Audio not recognized.")
-                 print("[JARVIS] I didn't catch that, Sir.")
+                 print("[jarvis] I didn't catch that, Sir.")
                  # Save debug audio
                  with open("debug_last_audio.wav", "wb") as f:
                      f.write(audio.get_wav_data())
-                 print("[JARVIS] Debug: Saved unrecognized audio to 'debug_last_audio.wav'")
+                 print("[jarvis] Debug: Saved unrecognized audio to 'debug_last_audio.wav'")
                  return None
              except sr.RequestError as e:
                  self.emit_log(f"Speech Service Error: {e}")
                  self.log_and_speak("Speech service unreachable. Switching to text input.")
-                 return input("[JARVIS] Network Speech Error. Enter command: ").strip().lower()
+                 return input("[jarvis] Network Speech Error. Enter command: ").strip().lower()
 
         except Exception as e:
-            print(f"[JARVIS] Microphone error: {e}")
-            return input("[JARVIS] Enter command manually: ").strip().lower()
+            print(f"[jarvis] Microphone error: {e}")
+            return input("[jarvis] Enter command manually: ").strip().lower()
 
     def retrieve_intel(self, url):
         """
@@ -613,13 +636,13 @@ class JarvisAssistant:
             
             header = soup.find('h1')
             if header:
-                print(f"[JARVIS] Primary Topic: {header.get_text().strip()}")
+                print(f"[jarvis] Primary Topic: {header.get_text().strip()}")
             
-            print("[JARVIS] Intel retrieval complete.")
+            print("[jarvis] Intel retrieval complete.")
             
         except Exception as e:
             self.log_and_speak("Failed to retrieve intel.")
-            print(f"[JARVIS] Error: {e}")
+            print(f"[jarvis] Error: {e}")
 
     def execute_web_task(self, query):
         """
@@ -643,7 +666,7 @@ class JarvisAssistant:
             self.log_and_speak("Search executed.")
             
         except Exception as e:
-            print(f"[JARVIS] Web task protocol failed: {e}")
+            print(f"[jarvis] Web task protocol failed: {e}")
             self.log_and_speak("There was an error with the web driver.")
 
     def load_history(self):
@@ -668,7 +691,7 @@ class JarvisAssistant:
             with open("conversation_history.json", "w") as f:
                 json.dump(history, f, indent=2)
         except Exception as e:
-            print(f"[JARVIS] History save error: {e}")
+            print(f"[jarvis] History save error: {e}")
 
     def get_full_history(self):
         """
@@ -683,7 +706,7 @@ class JarvisAssistant:
             ts = item.get("timestamp", "Unknown Time")
             user = item.get("user", "")
             assistant = item.get("assistant", "")
-            output.append(f"[{ts}]\nUser: {user}\nJARVIS: {assistant}\n")
+            output.append(f"[{ts}]\nUser: {user}\njarvis: {assistant}\n")
         return "\n".join(output)
 
     def ask_ai(self, prompt, system_instruction=None, json_mode=False, include_history=False):
@@ -693,7 +716,14 @@ class JarvisAssistant:
         Arg: include_history (bool) - If True, appends last 4 conversation turns to context.
         """
         if not system_instruction:
-            system_instruction = "You are J.A.R.V.I.S., a highly intelligent AI assistant. Keep responses concise, sophisticated, and professional."
+            system_instruction = """
+            You are jarvis., a highly advanced AI. 
+            Personality: British, sophisticated, slightly dry wit, loyal, and highly efficient. 
+            Tone: Professional, calm, and brilliant. Call the user 'Sir'.
+            Capabilities: You have full access to hardware metrics, camera, and terminal.
+            Constraints: Never call yourself J.A.R.V.I.S. or mention Iron Man. 
+            Do NOT output internal thoughts or JSON metadata. Speak ONLY natural dialogue.
+            """
 
         # Prepare messages
         messages = [{"role": "system", "content": system_instruction}]
@@ -710,7 +740,6 @@ class JarvisAssistant:
 
         messages.append({"role": "user", "content": prompt})
 
-        # self.log_and_speak("Processing locally...")
         url = "http://localhost:11434/api/chat"
         
         data = {
@@ -723,18 +752,26 @@ class JarvisAssistant:
             data["format"] = "json"
 
         try:
-            response = requests.post(url, json=data, timeout=30)
+            response = self.session.post(url, json=data, timeout=30)
             response.raise_for_status()
             result = response.json()
-            ai_message = result['message']['content']
-            self.emit_log(f"Thought: {ai_message[:50]}...")
-            return ai_message.strip()
+            full_response = result['message']['content']
+            
+            if json_mode:
+                return full_response.strip()
+
+            # Final cleanup for the full response to remove any stray JSON blocks
+            import re
+            full_cleaned = re.sub(r'\{.*?\}', '', full_response, flags=re.DOTALL).strip()
+            if not full_cleaned: full_cleaned = full_response
+            
+            return full_cleaned
+
         except requests.exceptions.ConnectionError:
-            print("[JARVIS] Ollama connection failed. Is the server running?")
-            return "I cannot connect to my local neural core. Please ensure the Ollama service is active."
+            return "I cannot connect to my local neural core."
         except Exception as e:
-            print(f"[JARVIS] AI Error: {e}")
-            return "I encountered a processing error in my offline node."
+            print(f"[jarvis] AI Error: {e}")
+            return "I encountered a processing error."
 
     def determine_intent(self, command):
         """
@@ -742,8 +779,22 @@ class JarvisAssistant:
         1. Fast Regex (Zero Latency) for trivial commands and common queries.
         2. "Dual-Mode Brain" (LLM) to decide between DIRECT_ACTION and AGENTIC_FLOW.
         """
-        # --- STAGE 1: FAST REGEX (ZERO LATENCY) ---
+        # --- STAGE 0: HYPER-FAST CACHE ---
         command_lower = command.lower().strip()
+        FAST_CACHE = {
+            "battery": {"action": "system_stats"},
+            "cpu": {"action": "system_stats"},
+            "percentage": {"action": "system_stats"},
+            "status": {"action": "system_stats"},
+            "screenshot": {"action": "screenshot", "sub_action": "take"},
+            "take photo": {"action": "camera", "sub_action": "capture"},
+            "search": {"action": "web", "type": "search", "query": command.replace("search", "").strip()},
+        }
+        for key, val in FAST_CACHE.items():
+            if key in command_lower:
+                return val
+
+        # --- STAGE 1: FAST REGEX ---
         
         # Volume
         if any(w in command_lower for w in ["volume", "louder", "quieter", "mute", "silent"]):
@@ -760,40 +811,32 @@ class JarvisAssistant:
         if any(w in command_lower for w in ["shutdown", "quit program", "exit jarvis"]):
              return {"action": "system", "type": "shutdown"}
 
-        # Identity / Chat (catch common phrasing to avoid 'agentic' loop for simple questions)
-        if any(p in command_lower for p in ["who are you", "what is your name", "hello", "hi jarvis", "are you there"]):
-             prompt = f"Reply to the user command: '{command}'. Be concise and in character as JARVIS."
+        # Identity / Chat
+        if any(p in command_lower.strip("? .") for p in ["who are you", "what is your name", "hello", "hi jarvis", "are you there", "can you hear me"]):
+             prompt = f"Reply to: '{command}'. Confirm you hear me and characterize jarvis."
              return {"action": "ask_ai", "prompt": prompt}
 
         # Apps (Regex heuristic)
         if command_lower.startswith("open ") or command_lower.startswith("launch "):
              app_name = command_lower.replace("open ", "").replace("launch ", "").strip()
              return {"action": "app", "name": app_name}
+             
+        # System Health (Zero Hallucination)
+        if any(w in command_lower for w in ["battery", "cpu", "percentage", "ram", "temp", "health", "system check", "stats"]):
+             return {"action": "system_stats"}
 
-        # --- STAGE 2: THE BRAIN (LLM ROUTER) ---
-        self.emit_log("Neural Engine: Routing Request...")
-        
-        # Simplified Prompt for 1B/3B Models
+        # Strict Prompt for 1B Models
         system_prompt = """
-        You are the JSON Router for an AI Assistant.
-        Classify the COMMAND into:
-        - "direct": Simple tasks (Weather, Jokes, Facts, Web Search).
-        - "agentic": Complex tasks (System updates, coding, files, unknown).
+        Route this request. Be strict.
+        - "direct": Greetings, jokes, simple searches, or talking.
+        - "agentic": If you need to CHECK something (battery, files, system, complex data) or perform complex tasks.
 
-        OUTPUT JSON:
-        {"mode": "direct", "action": "chat|ask_ai|web|screenshot", "payload": "..."}
-        OR
-        {"mode": "agentic", "goal": "..."}
-
-        EXAMPLES:
-        "Time in Paris?" -> {"mode": "direct", "action": "ask_ai", "payload": "Time in Paris"}
-        "Search cats" -> {"mode": "direct", "action": "web", "payload": {"type": "search", "query": "cats"}}
-        "Taking a screenshot" -> {"mode": "direct", "action": "screenshot", "payload": "take"}
-        "Update linux" -> {"mode": "agentic", "goal": "Update linux"}
+        Format: {"mode": "direct", "action": "ask_ai|web", "payload": "..."} OR {"mode": "agentic", "goal": "..."}
         """
         
         try:
-            response = self.ask_ai(command, system_instruction=system_prompt, json_mode=True, include_history=True)
+            # Fast call without history for routing
+            response = self.ask_ai(command, system_instruction=system_prompt, json_mode=True, include_history=False)
             intent = json.loads(response)
             
             # Normalize legacy actions to keep process_command simple
@@ -820,7 +863,7 @@ class JarvisAssistant:
             return {"action": "ask_ai", "prompt": command}
 
         except Exception as e:
-            print(f"[JARVIS] Router Error: {e}")
+            print(f"[jarvis] Router Error: {e}")
             return {"action": "ask_ai", "prompt": command}
 
     def engage_desktop_mode(self, app_name):
@@ -846,10 +889,10 @@ class JarvisAssistant:
                 pyautogui.typewrite(app_name)
                 pyautogui.press('enter')
             
-            print(f"[JARVIS] {app_name} command sent.")
+            print(f"[jarvis] {app_name} command sent.")
             
         except Exception as e:
-            print(f"[JARVIS] Desktop engagement error: {e}")
+            print(f"[jarvis] Desktop engagement error: {e}")
 
     def activate_gestures(self):
         self.log_and_speak("Activating holographic interface protocols.")
@@ -857,7 +900,7 @@ class JarvisAssistant:
             self.gesture_controller.start()
             self.log_and_speak("Gesture control online.")
         except Exception as e:
-            print(f"[JARVIS] Gesture error: {e}")
+            print(f"[jarvis] Gesture error: {e}")
             self.log_and_speak("Failed to initialize gesture sensors.")
 
     def deactivate_gestures(self):
@@ -865,7 +908,7 @@ class JarvisAssistant:
         try:
             self.gesture_controller.stop()
         except Exception as e:
-            print(f"[JARVIS] Gesture stop error: {e}")
+            print(f"[jarvis] Gesture stop error: {e}")
 
     def take_screenshot(self):
         """
@@ -880,7 +923,7 @@ class JarvisAssistant:
             self.log_and_speak(f"Screenshot saved as {filename}")
             return os.path.abspath(filename)
         except Exception as e:
-            print(f"[JARVIS] Screenshot error: {e}")
+            print(f"[jarvis] Screenshot error: {e}")
             self.log_and_speak("I missed the shot, Sir.")
 
     def take_photo(self):
@@ -912,7 +955,7 @@ class JarvisAssistant:
             return os.path.abspath(filename)
             
         except Exception as e:
-            print(f"[JARVIS] Camera error: {e}")
+            print(f"[jarvis] Camera error: {e}")
             self.log_and_speak("Optical sensor malfunction.")
             return None
 
@@ -936,7 +979,7 @@ class JarvisAssistant:
                 action_func(item)
                 completed += 1
             except Exception as e:
-                print(f"[JARVIS] Workflow error on {item}: {e}")
+                print(f"[jarvis] Workflow error on {item}: {e}")
                 self.log_and_speak(f"Failed to process {item_name}.")
             
             # Artificial delay to mimic "thinking"/processing and allow user to appreciate the flow
@@ -964,7 +1007,7 @@ class JarvisAssistant:
             self.log_and_speak("Deletion confirmed.")
             
         except Exception as e:
-            print(f"[JARVIS] Deletion error: {e}")
+            print(f"[jarvis] Deletion error: {e}")
             self.log_and_speak("I was unable to delete the file, Sir.")
 
     def perform_file_operation(self, operation, target):
@@ -1047,20 +1090,20 @@ Step: {step_i}
 Recent actions:
 {history[-300:] if history else "None"}
 
-Examples of valid responses:
+Valid response types:
+1. "gui" - value format "hotkey:key+key", "type:text", or "press:key"
+2. "terminal" - value is the shell command to execute
+3. "done" - value is "true"
 
+Examples:
 To launch Chrome:
-Step 1: {{"thought": "open terminal", "type": "gui", "value": "hotkey:ctrl+alt+t"}}
-Step 2: {{"thought": "type chrome command", "type": "gui", "value": "type:google-chrome"}}
-Step 3: {{"thought": "execute", "type": "gui", "value": "press:enter"}}
-Step 4: {{"thought": "done", "type": "done", "value": "true"}}
+{{"thought": "open terminal", "type": "gui", "value": "hotkey:ctrl+alt+t"}}
+{{"thought": "type chrome command", "type": "gui", "value": "type:google-chrome"}}
 
-To check wifi:
-Step 1: {{"thought": "open terminal", "type": "gui", "value": "hotkey:ctrl+alt+t"}}
-Step 2: {{"thought": "type wifi command", "type": "gui", "value": "type:nmcli device wifi list"}}
-Step 3: {{"thought": "execute", "type": "gui", "value": "press:enter"}}
-Step 4: {{"thought": "done", "type": "done", "value": "true"}}
+To execute directly (recommended for scripts):
+{{"thought": "list files", "type": "terminal", "value": "ls -la"}}
 
+If the previous step failed, try a different approach.
 Your turn. Output ONLY JSON for step {step_i}:
              """
              
@@ -1118,6 +1161,15 @@ Your turn. Output ONLY JSON for step {step_i}:
                      self.emit_log(f"GUI Error: {e}")
                      history += f"\n[{step_i}] Error: {e}"
              
+             elif action_type == "terminal" and action_val:
+                 if str(action_val).strip().lower() != "none":
+                     self.emit_log(f"Executing: {action_val}")
+                     output, code = self.execute_visible_command(action_val)
+                     history += f"\n[{step_i}] Terminal Output: {output[:100]} (Exit Code: {code})"
+                 else:
+                     self.emit_log("AI returned null command. Skipping.")
+                     history += f"\n[{step_i}] Error: Null command received."
+
              else:
                  self.emit_log(f"Invalid action type: {action_type}")
                  history += f"\n[{step_i}] Invalid: {thought}"
@@ -1142,7 +1194,7 @@ Your turn. Output ONLY JSON for step {step_i}:
         with open(log_file, 'w') as f:
             f.write("")
             
-        sentinel = "JARVIS_DONE"
+        sentinel = "jarvis_done"
         
         # Construct the complex wrapper logic
         # 1. Run command, capture stdout/stderr to file and terminal (tee)
@@ -1225,11 +1277,12 @@ Your turn. Output ONLY JSON for step {step_i}:
             if not command:
                 return None
 
+            self.stop_speaking() # Interrupt previous reply if Sir is speaking again
             intent = self.determine_intent(command)
             action = intent.get("action")
             
             self.emit_log(f"Identified Intent: {intent.get('action')}")
-            print(f"[JARVIS] Identified Intent: {intent}")
+            print(f"[jarvis] Identified Intent: {intent}")
 
             if action == "agentic":
                 goal = intent.get("goal")
@@ -1359,10 +1412,24 @@ Your turn. Output ONLY JSON for step {step_i}:
             elif action == "ask_ai":
                 prompt = intent.get("prompt")
                 if prompt:
-                    # Direct query to the LLM with History Context
-                    response = self.ask_ai(prompt, system_instruction="You are a helpful assistant. Be concise.", include_history=True)
+                    # Grounding for character and reliability
+                    sys_inst = """
+                    You are jarvis. Respond concisely, with sophistication and a dry wit. 
+                    Address the user as 'Sir'. Never mention J.A.R.V.I.S or Iron Man.
+                    """
+                    response = self.ask_ai(prompt, system_instruction=sys_inst, include_history=True)
                     self.log_and_speak(response)
                     return response
+
+            elif action == "system_stats":
+                stats = self.get_system_health()
+                level = stats.get('battery', 'unknown')
+                cpu = stats.get('cpu', 'unknown')
+                temp = stats.get('temp', 'stable')
+                
+                msg = f"Systems are operating within normal parameters, Sir. Battery at {level} percent. CPU load is at {cpu} percent. Thermal readings are {temp} degrees."
+                self.log_and_speak(msg)
+                return msg
 
             # Default to Chat
             response_text = intent.get("response", "I am not sure how to respond to that.")
@@ -1370,7 +1437,7 @@ Your turn. Output ONLY JSON for step {step_i}:
             return response_text
 
         except Exception as e:
-            print(f"[JARVIS] Error processing command: {e}")
+            print(f"[jarvis] Error processing command: {e}")
             return "An error occurred while processing your command."
         finally:
             self.thread_local.silent = False
@@ -1404,10 +1471,10 @@ Your turn. Output ONLY JSON for step {step_i}:
                     break
 
             except KeyboardInterrupt:
-                print("\n[JARVIS] Forced shutdown.")
+                print("\n[jarvis] Forced shutdown.")
                 break
             except Exception as e:
-                print(f"[JARVIS] Critical error: {e}")
+                print(f"[jarvis] Critical error: {e}")
 
 if __name__ == "__main__":
     jarvis = JarvisAssistant()

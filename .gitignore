@@ -1,6 +1,41 @@
+# Credentials and Environment
 .env
+.env.local
+
+# Virtual Environment
+.venv/
+env/
+venv/
+ENV/
+
+# Hardware & Large Models (Ollama handles models, Vosk/Piper handled locally)
+piper_tts/
+vosk_model/
+DATA/
+
+# Python Cache
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# Logs and Debugging
 *.log
 *.wav
+debug_*.py
+test_*.py
+
+# Assets and Generated Data
+*.png
 conversation_history.json
+jarvis_screenshot_*.png
+jarvis_camera_*.png
+
+# Backups and Local Artifacts
+*.bak
+*.backup
+*.bak.*
+jarvis_assistant.py.*
+*.optimized
+*.final
+*.interrupted
+*.v2

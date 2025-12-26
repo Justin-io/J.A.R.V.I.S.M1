@@ -13,7 +13,7 @@ class TelegramInterface:
         self.loop = None
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="J.A.R.V.I.S. Online. Awaiting commands.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="jarvis online. Awaiting commands, Sir.")
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.message:
@@ -28,14 +28,14 @@ class TelegramInterface:
                     try:
                         with open(".env", "a") as f:
                             f.write(f"\nTELEGRAM_CHAT_ID={chat_id}")
-                        print(f"[TELEGRAM] Secured new uplink ID: {chat_id}")
+                        print(f"[telegram] Secured new uplink ID: {chat_id}")
                     except Exception as e:
-                        print(f"[JARVIS] Failed to persist chat ID: {e}")
+                        print(f"[jarvis] Failed to persist chat ID: {e}")
             
-            print(f"[TELEGRAM] Received: {user_text}")
+            print(f"[telegram] Received: {user_text}")
         
         # Log to Jarvis UI as a user command
-        self.jarvis.emit_log(f"[TELEGRAM] {user_text}", user=True)
+        self.jarvis.emit_log(f"[telegram] {user_text}", user=True)
         
         # Process command via Jarvis
         # Run in a separate thread to prevent blocking the async loop
@@ -54,14 +54,14 @@ class TelegramInterface:
                     if path_part and path_part != "None" and os.path.exists(path_part):
                         photo_path = path_part
                 except Exception as e:
-                    print(f"[TELEGRAM] Error parsing screenshot path: {e}")
+                    print(f"[telegram] Error parsing screenshot path: {e}")
 
             # Send photo if available
             if photo_path:
                 try:
                     await context.bot.send_photo(chat_id=update.effective_chat.id, photo=open(photo_path, 'rb'))
                 except Exception as e:
-                    print(f"[TELEGRAM] Failed to send photo: {e}")
+                    print(f"[telegram] Failed to send photo: {e}")
                     text_to_send += " [Failed to upload screenshot]"
 
             # Send text response
@@ -72,11 +72,11 @@ class TelegramInterface:
 
     async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Log Errors caused by Updates."""
-        print(f"[TELEGRAM] Error: {context.error}")
+        print(f"[telegram] Error: {context.error}")
 
     def _run_bot(self):
         if not self.token:
-            print("[JARVIS] Warning: TELEGRAM_BOT_TOKEN not found. Telegram interface disabled.")
+            print("[jarvis] Warning: TELEGRAM_BOT_TOKEN not found. Telegram interface disabled.")
             return
 
         # Create a new event loop for this thread
@@ -95,8 +95,12 @@ class TelegramInterface:
         self.application.add_error_handler(self.error_handler)
         
         # Disable signal handling since we are in a background thread
-        print("[JARVIS] Telegram Interface Initialized.")
-        self.application.run_polling(stop_signals=None)
+        print("[jarvis] Telegram Interface Initialized.")
+        try:
+            # bootstrap_retries=-1 allows infinite retries if the network is down at startup
+            self.application.run_polling(stop_signals=None, bootstrap_retries=-1)
+        except Exception as e:
+            print(f"[jarvis] Telegram Polling Stopped: {e}")
 
     def start_polling(self):
         """
