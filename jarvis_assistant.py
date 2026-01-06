@@ -129,7 +129,7 @@ class JarvisAssistant:
         # Startup Sequence
         print("[jarvis] Loading core modules...")
         self.emit_log("Connecting to satellite network...")
-        self.log_and_speak("Systems Online.")
+        self.perform_startup_check()
         
         # Start Background Health Monitor
         if self.psutil:
@@ -139,6 +139,20 @@ class JarvisAssistant:
         if self.psutil:
              self.telemetry_thread = threading.Thread(target=self.telemetry_loop, daemon=True)
              self.telemetry_thread.start()
+
+    def perform_startup_check(self):
+        """
+        Speak a short, direct startup message.
+        """
+        current_time = time.strftime("%I:%M %p")
+        stats = self.get_system_health()
+        
+        status_msg = f"Systems Online. {current_time}."
+        if stats:
+            batt = int(stats.get('battery', 0))
+            status_msg += f" Battery {batt}%."
+            
+        self.log_and_speak(status_msg)
 
     def telemetry_loop(self):
         """
@@ -568,27 +582,15 @@ class JarvisAssistant:
              self.emit_log("Processing...")
              # print("[jarvis] Processing...") # already emitted above
              try:
-                 command = ""
-                 # Try Vosk if model exists
-                 if os.path.exists("vosk_model"):
-                     self.emit_log("Neural Core: Local Recognition...")
-                     try:
-                         res = self.recognizer.recognize_vosk(audio)
-                         if res:
-                             command = json.loads(res).get("text", "").lower()
-                     except Exception:
-                         # Fallback to Google if Vosk fails or returns bad JSON
-                         command = self.recognizer.recognize_google(audio).lower()
-                 else:
-                     command = self.recognizer.recognize_google(audio).lower()
+                 command = self.recognizer.recognize_google(audio).lower()
                  
                  if not command or not command.strip():
                      return None
                  
                  self.emit_log(f"Heard: '{command}'", user=True)
 
-                 # Check for STOP command immediately
-                 if command in ["stop", "silence", "shh", "quiet"]:
+                 # Check for STOP command immediately (more permissive)
+                 if any(w in command for w in ["stop", "silence", "shh", "quiet", "shut up"]):
                      self.stop_speaking()
                      self.emit_log("Command: STOP")
                      return None
@@ -825,46 +827,10 @@ class JarvisAssistant:
         if any(w in command_lower for w in ["battery", "cpu", "percentage", "ram", "temp", "health", "system check", "stats"]):
              return {"action": "system_stats"}
 
-        # Strict Prompt for 1B Models
-        system_prompt = """
-        Route this request. Be strict.
-        - "direct": Greetings, jokes, simple searches, or talking.
-        - "agentic": If you need to CHECK something (battery, files, system, complex data) or perform complex tasks.
-
-        Format: {"mode": "direct", "action": "ask_ai|web", "payload": "..."} OR {"mode": "agentic", "goal": "..."}
-        """
-        
-        try:
-            # Fast call without history for routing
-            response = self.ask_ai(command, system_instruction=system_prompt, json_mode=True, include_history=False)
-            intent = json.loads(response)
-            
-            # Normalize legacy actions to keep process_command simple
-            if intent.get("mode") == "direct":
-                act = intent.get("action")
-                payload = intent.get("payload")
-                
-                # Mapper
-                if act == "chat": return {"action": "chat", "response": payload}
-                if act == "ask_ai": return {"action": "ask_ai", "prompt": payload}
-                if act == "web": 
-                    if isinstance(payload, dict):
-                         return {"action": "web", "type": payload.get("type"), "query": payload.get("query")}
-                    return {"action": "web", "type": "search", "query": payload}
-                if act == "screenshot": return {"action": "screenshot", "sub_action": "take"}
-                
-                # Unknown Direct Fallback
-                return {"action": "ask_ai", "prompt": command}
-            
-            elif intent.get("mode") == "agentic":
-                return {"action": "agentic", "goal": intent.get("goal") or command}
-                
-            # Default
-            return {"action": "ask_ai", "prompt": command}
-
-        except Exception as e:
-            print(f"[jarvis] Router Error: {e}")
-            return {"action": "ask_ai", "prompt": command}
+        # Default: Optimized Fast Path
+        # Skip the complex "Router" LLM call and go straight to the local AI for general questions.
+        # This significantly reduces latency for simple interactions.
+        return {"action": "ask_ai", "prompt": command}
 
     def engage_desktop_mode(self, app_name):
         """

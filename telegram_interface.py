@@ -15,31 +15,26 @@ class TelegramInterface:
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=update.effective_chat.id, text="jarvis online. Awaiting commands, Sir.")
 
-    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.message:
-            user_text = update.message.text
-            chat_id = update.effective_chat.id
-            
-            # Store ID for outbound messages
-            if self.jarvis:
-                if self.jarvis.telegram_chat_id != str(chat_id):
-                    self.jarvis.telegram_chat_id = str(chat_id)
-                    # Persist to .env
-                    try:
-                        with open(".env", "a") as f:
-                            f.write(f"\nTELEGRAM_CHAT_ID={chat_id}")
-                        print(f"[telegram] Secured new uplink ID: {chat_id}")
-                    except Exception as e:
-                        print(f"[jarvis] Failed to persist chat ID: {e}")
-            
-            print(f"[telegram] Received: {user_text}")
+    async def process_input(self, text, update, context):
+        """
+        Common processor for text and commands.
+        """
+        chat_id = update.effective_chat.id
+        self.jarvis.emit_log(f"[telegram] {text}", user=True)
         
-        # Log to Jarvis UI as a user command
-        self.jarvis.emit_log(f"[telegram] {user_text}", user=True)
-        
-        # Process command via Jarvis
-        # Run in a separate thread to prevent blocking the async loop
-        response = await asyncio.to_thread(self.jarvis.process_command, user_text, silent=True)
+        # Store ID if new
+        if self.jarvis and self.jarvis.telegram_chat_id != str(chat_id):
+            self.jarvis.telegram_chat_id = str(chat_id)
+            try:
+                with open(".env", "a") as f:
+                    f.write(f"\nTELEGRAM_CHAT_ID={chat_id}")
+            except:
+                pass
+
+        # Process via Jarvis
+        # We enforce "screenshot" command if it maps to that intent, 
+        # but here we just pass the text.
+        response = await asyncio.to_thread(self.jarvis.process_command, text, silent=True)
         
         if response:
             text_to_send = response
@@ -53,51 +48,59 @@ class TelegramInterface:
                     path_part = parts[1].replace("||", "").strip()
                     if path_part and path_part != "None" and os.path.exists(path_part):
                         photo_path = path_part
-                except Exception as e:
-                    print(f"[telegram] Error parsing screenshot path: {e}")
+                except Exception:
+                    pass
 
             # Send photo if available
             if photo_path:
                 try:
-                    await context.bot.send_photo(chat_id=update.effective_chat.id, photo=open(photo_path, 'rb'))
+                    await context.bot.send_photo(chat_id=chat_id, photo=open(photo_path, 'rb'))
                 except Exception as e:
                     print(f"[telegram] Failed to send photo: {e}")
-                    text_to_send += " [Failed to upload screenshot]"
+                    text_to_send += " [Upload Failed]"
 
             # Send text response
-            if text_to_send:
-                await context.bot.send_message(chat_id=update.effective_chat.id, text=text_to_send)
+            if text_to_send and text_to_send.strip():
+                await context.bot.send_message(chat_id=chat_id, text=text_to_send)
         else:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="Command processed.")
+            await context.bot.send_message(chat_id=chat_id, text="Command processed.")
+
+
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.message and update.message.text:
+            await self.process_input(update.message.text, update, context)
+
+    async def cmd_screenshot(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        # Force the input to be just "screenshot" to ensure the intent is caught
+        await self.process_input("screenshot", update, context)
 
     async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Log Errors caused by Updates."""
         print(f"[telegram] Error: {context.error}")
 
     def _run_bot(self):
         if not self.token:
-            print("[jarvis] Warning: TELEGRAM_BOT_TOKEN not found. Telegram interface disabled.")
+            print("[jarvis] Warning: TELEGRAM_BOT_TOKEN missing.")
             return
 
-        # Create a new event loop for this thread
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
 
-        # Configure request with longer timeouts for file uploads
         request = HTTPXRequest(connect_timeout=60, read_timeout=60)
         self.application = ApplicationBuilder().token(self.token).request(request).build()
         
-        start_handler = CommandHandler('start', self.start)
-        echo_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), self.handle_message)
+        # Handlers
+        self.application.add_handler(CommandHandler('start', self.start))
+        self.application.add_handler(CommandHandler('screenshot', self.cmd_screenshot))
+        self.application.add_handler(CommandHandler('photo', self.cmd_screenshot))
         
-        self.application.add_handler(start_handler)
-        self.application.add_handler(echo_handler)
+        # Catch-all for text AND other commands (slash commands not explicitly handled above)
+        # We removed (~filters.COMMAND) so /any_other_command is passed as text
+        self.application.add_handler(MessageHandler(filters.TEXT, self.handle_message))
+        
         self.application.add_error_handler(self.error_handler)
         
-        # Disable signal handling since we are in a background thread
         print("[jarvis] Telegram Interface Initialized.")
         try:
-            # bootstrap_retries=-1 allows infinite retries if the network is down at startup
             self.application.run_polling(stop_signals=None, bootstrap_retries=-1)
         except Exception as e:
             print(f"[jarvis] Telegram Polling Stopped: {e}")
