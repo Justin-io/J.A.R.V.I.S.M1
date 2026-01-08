@@ -190,11 +190,14 @@ function addLog(text, type = 'system') {
     ringGroup.add(ring1);
     ringGroup.add(ring2);
 
+    // Expose control to global scope
+    window.JARVIS_ROTATION_SPEED = 0.002;
+
     // Animation Loop
     function animate() {
         requestAnimationFrame(animate);
 
-        brainGroup.rotation.y += 0.002;
+        brainGroup.rotation.y += window.JARVIS_ROTATION_SPEED;
         coreMesh.rotation.x -= 0.005;
         coreMesh.rotation.z += 0.002;
 
@@ -217,9 +220,6 @@ function addLog(text, type = 'system') {
 
         // Dynamic Lines (Optimized)
         const connectionDist = 2.5;
-        // Only check a subset per frame or just accept the O(N^2) for N=400 on modern PC
-        // For N=400, N^2=160,000 checks. Doable in JS. Maybe limit connections to first 1000 to save buffers?
-        // We'll stick to full check but strict distance to keep line count low
 
         let lineIdx = 0;
         for (let i = 0; i < particleCount; i++) {
@@ -276,23 +276,43 @@ socket.on('disconnect', () => {
     addLog("SIGNAL LOST. Attempting reconnect...", 'status');
 });
 
+const interruptBtn = document.getElementById('interrupt-btn');
+if (interruptBtn) {
+    interruptBtn.addEventListener('click', () => {
+        socket.emit('stop_command');
+        addLog("INTERRUPT SIGNAL SENT.", 'status');
+        // Visual feedback on button
+        interruptBtn.classList.add('bg-red-500', 'text-white');
+        setTimeout(() => {
+            interruptBtn.classList.remove('bg-red-500', 'text-white');
+        }, 200);
+    });
+}
+
+// 3D Speed Control
+let rotationSpeedY = 0.002;
+let pulseIntensity = 1.0;
+
 socket.on('status_update', (data) => {
     const status = data.status; // 'listening', 'processing', 'speaking', 'idle'
-    const reactor = document.querySelector('canvas'); // Target the 3D canvas for effects if possible, or just the container
+    const reactor = document.querySelector('canvas');
 
     if (status === 'listening') {
         aiStatusText.innerHTML = "STATUS: <span class='text-yellow-400 animate-pulse'>LISTENING</span>";
-        // Visual cue
         if (reactor) reactor.style.filter = "brightness(1.5) drop-shadow(0 0 10px yellow)";
+        if (window.JARVIS_ROTATION_SPEED !== undefined) window.JARVIS_ROTATION_SPEED = 0.002;
     } else if (status === 'processing') {
         aiStatusText.innerHTML = "STATUS: <span class='text-purple-400 animate-pulse'>PROCESSING</span>";
         if (reactor) reactor.style.filter = "brightness(1.5) drop-shadow(0 0 10px purple)";
+        if (window.JARVIS_ROTATION_SPEED !== undefined) window.JARVIS_ROTATION_SPEED = 0.02; // Spin faster
     } else if (status === 'speaking') {
         aiStatusText.innerHTML = "STATUS: <span class='text-cyan-400 animate-pulse'>SPEAKING</span>";
         if (reactor) reactor.style.filter = "brightness(1.2) drop-shadow(0 0 15px cyan)";
+        if (window.JARVIS_ROTATION_SPEED !== undefined) window.JARVIS_ROTATION_SPEED = 0.005;
     } else {
         aiStatusText.innerHTML = "NEURAL ENGINE: <span class='text-cyan-300'>ONLINE</span>";
         if (reactor) reactor.style.filter = "none";
+        if (window.JARVIS_ROTATION_SPEED !== undefined) window.JARVIS_ROTATION_SPEED = 0.002;
     }
 });
 

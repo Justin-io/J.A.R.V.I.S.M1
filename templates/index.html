@@ -227,6 +227,12 @@
                     <div id="time-display" class="font-mono text-xl tracking-wider text-cyan-200">00:00:00</div>
                 </div>
             </div>
+
+            <!-- INTERRUPT BUTTON -->
+            <button id="interrupt-btn"
+                class="absolute top-20 right-6 pointer-events-auto bg-red-900/20 hover:bg-red-500/20 border border-red-500/50 hover:border-red-500 text-red-400 hover:text-red-200 px-4 py-2 rounded text-xs tracking-[0.2em] font-bold transition-all duration-200 active:scale-95 shadow-[0_0_10px_rgba(255,0,0,0.2)] z-50">
+                [ INTERRUPT ]
+            </button>
         </header>
 
         <!-- MAIN GRID LAYOUT -->
@@ -369,10 +375,6 @@
                     <div id="terminal-content"
                         class="p-4 font-mono text-xs text-cyan-300/80 overflow-y-auto flex-grow space-y-1.5">
                         <!-- Logs inject here -->
-                        <div class="opacity-50 border-l-2 border-cyan-800 pl-2">>> Initializing neural weights... OK
-                        </div>
-                        <div class="opacity-50 border-l-2 border-cyan-800 pl-2">>> Mounting device file system... OK
-                        </div>
                     </div>
                 </div>
             </div>

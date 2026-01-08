@@ -11,6 +11,7 @@ class TelegramInterface:
         self.token = os.getenv("TELEGRAM_BOT_TOKEN")
         self.application = None
         self.loop = None
+        self.keyboard_mode = False
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=update.effective_chat.id, text="jarvis online. Awaiting commands, Sir.")
@@ -67,43 +68,97 @@ class TelegramInterface:
 
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.message and update.message.text:
-            await self.process_input(update.message.text, update, context)
+        text = update.message.text
+        
+        # UX Improvement: Allow toggling keyboard without slash if it's the only word
+        if text and text.strip().lower() == "keyboard":
+             await self.cmd_keyboard(update, context)
+             return
+
+        if self.keyboard_mode:
+            # Direct Keyboard Pass-through
+            if text:
+                 # Check for explicit exit command
+                 if text.strip() == "/exit":
+                     self.keyboard_mode = False
+                     await context.bot.send_message(chat_id=update.effective_chat.id, text="Keyboard mode disabled.")
+                     return
+
+                 result = await asyncio.to_thread(self.jarvis.execute_keyboard_input, text)
+                 return
+
+        if text:
+            await self.process_input(text, update, context)
 
     async def cmd_screenshot(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Force the input to be just "screenshot" to ensure the intent is caught
         await self.process_input("screenshot", update, context)
 
-    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        print(f"[telegram] Error: {context.error}")
+    async def cmd_keyboard(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Toggle Keyboard Mode"""
+        self.keyboard_mode = not self.keyboard_mode
+        state = "ENABLED" if self.keyboard_mode else "DISABLED"
+        msg = f"Remote Keyboard {state}.\n"
+        if self.keyboard_mode:
+            msg += "Messages will now be typed directly to the host machine.\n"
+            msg += "Examples: 'ctrl+c', 'enter', 'Hello World'\n"
+            msg += "Send /keyboard again to disable."
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
 
-    def _run_bot(self):
+    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        err = str(context.error)
+        if "ReadError" in err or "NetworkError" in err or "ConnectError" in err:
+            print(f"[telegram] Static on the line (Network Flicker). Reconnecting...")
+        else:
+            print(f"[telegram] System Alert: {err}")
+
+    async def _async_run_bot(self):
+        """Async core for the Telegram bot lifecycle."""
         if not self.token:
             print("[jarvis] Warning: TELEGRAM_BOT_TOKEN missing.")
             return
 
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
+        # Build application inside the loop
+        request = HTTPXRequest(connect_timeout=120, read_timeout=120)
+        self.application = (
+            ApplicationBuilder()
+            .token(self.token)
+            .request(request)
+            .build()
+        )
 
-        request = HTTPXRequest(connect_timeout=60, read_timeout=60)
-        self.application = ApplicationBuilder().token(self.token).request(request).build()
-        
-        # Handlers
+        # Register Handlers
         self.application.add_handler(CommandHandler('start', self.start))
         self.application.add_handler(CommandHandler('screenshot', self.cmd_screenshot))
         self.application.add_handler(CommandHandler('photo', self.cmd_screenshot))
-        
-        # Catch-all for text AND other commands (slash commands not explicitly handled above)
-        # We removed (~filters.COMMAND) so /any_other_command is passed as text
+        self.application.add_handler(CommandHandler('keyboard', self.cmd_keyboard))
         self.application.add_handler(MessageHandler(filters.TEXT, self.handle_message))
-        
         self.application.add_error_handler(self.error_handler)
+
+        # Lifecycle Management
+        print("[jarvis] Telegram Interface: Initializing Neural Link...")
+        await self.application.initialize()
+        await self.application.start()
         
-        print("[jarvis] Telegram Interface Initialized.")
+        # Start Polling
+        await self.application.updater.start_polling(drop_pending_updates=True)
+        print("[jarvis] Telegram Interface: Satellite Link Established.")
+
+        # Keep the coroutine alive while the bot is running
+        while True:
+            await asyncio.sleep(10)
+
+    def _run_bot(self):
+        """Thread entry point for the Telegram bot."""
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        
         try:
-            self.application.run_polling(stop_signals=None, bootstrap_retries=-1)
+            self.loop.run_until_complete(self._async_run_bot())
         except Exception as e:
-            print(f"[jarvis] Telegram Polling Stopped: {e}")
+            print(f"[jarvis] Telegram Interface: Logic Failure: {e}")
+        finally:
+            self.loop.close()
 
     def start_polling(self):
         """

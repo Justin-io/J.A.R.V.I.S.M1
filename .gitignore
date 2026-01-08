@@ -1,6 +1,18 @@
 # Credentials and Environment
 .env
 .env.local
+.env.*
+secrets.py
+*.pem
+*.key
+id_rsa
+id_rsa.pub
+config.json
+
+# IDE & System
+.idea/
+.vscode/
+.DS_Store
 
 # Virtual Environment
 .venv/
@@ -23,10 +35,16 @@ __pycache__/
 *.wav
 debug_*.py
 test_*.py
+jarvis_term_*.log
 
 # Assets and Generated Data
 *.png
 conversation_history.json
+conversation_history.json.bak
+jarvis_memory.db
+*.sqlite
+*.sqlite3
+model
 jarvis_screenshot_*.png
 jarvis_camera_*.png
 
@@ -39,3 +57,4 @@ jarvis_assistant.py.*
 *.final
 *.interrupted
 *.v2
+.agent/

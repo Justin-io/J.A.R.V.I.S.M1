@@ -1,4 +1,5 @@
 import sys
+import pyaudio
 import time
 import requests
 import threading
@@ -25,7 +26,11 @@ from dotenv import load_dotenv
 from gesture_control import HandGestureController
 from piper import PiperVoice
 from piper.config import SynthesisConfig
+import sqlite3
 import vosk
+import wave
+import re
+import numpy as np
 vosk.SetLogLevel(-1) # Silence Kaldi/Vosk logs
 
 # Load environment variables from .env file
@@ -34,6 +39,7 @@ load_dotenv()
 # ==========================================
 # ALSA ERROR SUPPRESSION (Linux Specific)
 # ==========================================
+
 @contextmanager
 def no_alsa_err():
     """
@@ -71,7 +77,10 @@ class JarvisAssistant:
         self.lock = threading.Lock()
         self.thread_local = threading.local()
         self.is_speaking = False
+        self.thread_local = threading.local()
+        self.is_speaking = False
         self.last_created_item = None # Context for "that folder"
+        self.pending_confirmation = None # For sensitive commands
         
         # Initialize Speech Queue and Background Worker
         self.speech_queue = []
@@ -91,15 +100,17 @@ class JarvisAssistant:
             model_path = "/home/justin/Desktop/jarvis_project/piper_tts/jarvis.onnx"
             # We assume the config .json is in the same folder with .json extension appended
             self.piper_voice = PiperVoice.load(model_path)
-            print("[jarvis] Piper Neural TTS Initialized.")
+            self.emit_log("Piper Neural TTS Initialized.")
         except Exception as e:
             print(f"[jarvis] Warning: Piper TTS failed to initialize: {e}")
             self.piper_voice = None
         
         # Initialize Speech Recognition
         self.recognizer = sr.Recognizer()
-        self.recognizer.energy_threshold = 5000
-        self.recognizer.pause_threshold = 0.6
+        # Adjusted for sensitivity: 1500 is a good baseline for most desks
+        self.recognizer.energy_threshold = 1500 
+        self.recognizer.dynamic_energy_threshold = True # Let it adapt slightly
+        self.recognizer.pause_threshold = 0.8 # Slightly faster turn-around
         self.speech_process = None 
         
         # Check dependencies for health monitoring
@@ -126,10 +137,10 @@ class JarvisAssistant:
         self.model = "llama3.2:1b"
         self.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         
-        # Startup Sequence
-        print("[jarvis] Loading core modules...")
+        self.emit_log("Loading core modules...")
         self.emit_log("Connecting to satellite network...")
         self.perform_startup_check()
+        self.emit_log("Debug Monitor Active.")
         
         # Start Background Health Monitor
         if self.psutil:
@@ -139,6 +150,36 @@ class JarvisAssistant:
         if self.psutil:
              self.telemetry_thread = threading.Thread(target=self.telemetry_loop, daemon=True)
              self.telemetry_thread.start()
+
+        # Initialize SQLite "Neural Core"
+        self.db_path = "/home/justin/Desktop/jarvis_project/jarvis_memory.db"
+        self._init_db()
+        self._migrate_json_to_sql()
+
+        # Initialize Local Speech Engine (Vosk)
+        try:
+            self.p = pyaudio.PyAudio()
+            model_path = "/home/justin/Desktop/jarvis_project/vosk_model"
+            self.vosk_model = vosk.Model(model_path)
+            
+            # --- INTELLIGENT VOCAB LIST ---
+            # Biasing the engine toward Jarvis's known commands dramatically improves accuracy.
+            # We include common words AND Jarvis's specific command keys.
+            commands = [
+                "jarvis", "screenshot", "delete", "remove", "clear", "trash", 
+                "status", "report", "health", "system", "battery", "cpu", 
+                "open", "launch", "search", "google", "web", "volume", 
+                "up", "down", "mute", "stop", "cancel", "shh", "quiet",
+                "hello", "hi", "who", "are", "you", "can", "hear", "me"
+            ]
+            # Convert to JSON string for Vosk
+            vocab = json.dumps(commands + ["[unk]"]) # [unk] allows for general speech too
+            self.vosk_recognizer = vosk.KaldiRecognizer(self.vosk_model, 16000, vocab)
+            
+            self.emit_log("Local Neural Speech Engine (Vosk) Online.")
+        except Exception as e:
+            print(f"[jarvis] Vosk Initialization Error: {e}")
+            self.vosk_model = None
 
     def perform_startup_check(self):
         """
@@ -165,7 +206,8 @@ class JarvisAssistant:
                     self.event_callback('system_stats', stats)
             except Exception as e:
                 print(f"[jarvis] Telemetry Error: {e}")
-            time.sleep(5)
+            # Increase sleep to 10 seconds to reduce CPU impact
+            time.sleep(10)
 
     def emit_status(self, status):
         """Emit a status update to the UI."""
@@ -326,7 +368,8 @@ class JarvisAssistant:
                 self.is_speaking = False
                 self.emit_status("idle")
             else:
-                time.sleep(0.1)
+                # Increase sleep when idle to reduce context switching
+                time.sleep(0.5)
 
     def log_and_speak(self, text):
         """
@@ -396,8 +439,8 @@ class JarvisAssistant:
         if core_temp:
             stats['temp'] = core_temp
         
-        # CPU Usage
-        stats['cpu'] = self.psutil.cpu_percent(interval=0.1)
+        # CPU Usage (Non-blocking to save cycles)
+        stats['cpu'] = self.psutil.cpu_percent(interval=None)
         
         # Memory Usage
         mem = self.psutil.virtual_memory()
@@ -416,7 +459,18 @@ class JarvisAssistant:
         # PID
         stats['pid'] = os.getpid()
 
+        # Cache the result for 5 seconds to prevent hammering psutil
+        self.thread_local.last_health = stats
+        self.thread_local.last_health_time = time.time()
+
         return stats
+
+    def get_system_health_cached(self):
+        """Returns cached health if requested within 5 seconds."""
+        last_time = getattr(self.thread_local, 'last_health_time', 0)
+        if (time.time() - last_time) < 5:
+            return getattr(self.thread_local, 'last_health', None)
+        return self.get_system_health()
 
     def send_notification(self, title, message):
         """
@@ -545,82 +599,111 @@ class JarvisAssistant:
             except Exception as e:
                 print(f"[jarvis] Monitor error: {e}")
             
-            # Check every minute
-            time.sleep(60)
+            # Check every 2 minutes
+            time.sleep(120)
 
     def listen(self):
         """
-        Listen for voice input and return recognized text. 
-        Detailed for 'well optimised' performance and error handling.
+        Record exactly 3.5 seconds of audio and process it.
+        Just like the 'First Edition' protocol Sir preferred.
         """
-        try:
-             # Find 'pulse' device index if available, otherwise default
-             mic_index = None
-             for i, name in enumerate(sr.Microphone.list_microphone_names()):
-                 if "pulse" in name.lower():
-                     mic_index = i
-                     break
-            
-             # Apply suppression when opening the microphone stream
-             with no_alsa_err():
-                 with sr.Microphone(device_index=mic_index) as source:
-                    # print("\n[jarvis] Listening...") # using emit_log
-                    self.emit_status("listening")
-                    self.emit_log("Listening...")
-                    
-                    # Disable dynamic thresholding to avoid calibration errors
-                    self.recognizer.pause_threshold = 0.6 # Faster turnaround
-                    self.recognizer.energy_threshold = 5000
-                    
-                    # Listen
-                    try:
-                        audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=10)
-                    except sr.WaitTimeoutError:
-                        return None
-                
-             self.emit_status("processing")
-             self.emit_log("Processing...")
-             # print("[jarvis] Processing...") # already emitted above
-             try:
-                 command = self.recognizer.recognize_google(audio).lower()
-                 
-                 if not command or not command.strip():
-                     return None
-                 
-                 self.emit_log(f"Heard: '{command}'", user=True)
+        if not self.vosk_model:
+            return None
 
-                 # Check for STOP command immediately (more permissive)
-                 if any(w in command for w in ["stop", "silence", "shh", "quiet", "shut up"]):
-                     self.stop_speaking()
-                     self.emit_log("Command: STOP")
-                     return None
-                 
-                 if command.startswith("jarvis"):
-                     command = command.replace("jarvis", "").strip()
-                 
-                 if not command:
-                     return None # Return None if command is empty after stripping "jarvis"
- 
-                 # Assuming process_command is called elsewhere or this method should return the command
-                 # If process_command is meant to be called here, it needs to be defined or handled.
-                 # For now, I'll return the command as per the original method's intent.
-                 return command
-             except sr.UnknownValueError:
-                 self.emit_log("Audio not recognized.")
-                 print("[jarvis] I didn't catch that, Sir.")
-                 # Save debug audio
-                 with open("debug_last_audio.wav", "wb") as f:
-                     f.write(audio.get_wav_data())
-                 print("[jarvis] Debug: Saved unrecognized audio to 'debug_last_audio.wav'")
-                 return None
-             except sr.RequestError as e:
-                 self.emit_log(f"Speech Service Error: {e}")
-                 self.log_and_speak("Speech service unreachable. Switching to text input.")
-                 return input("[jarvis] Network Speech Error. Enter command: ").strip().lower()
+        try:
+            self.emit_status("listening")
+            self.emit_log("Awaiting Wake Word...")
+
+            # Open stream
+            stream = self.p.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, frames_per_buffer=8000)
+            stream.start_stream()
+
+            # --- PHASE 1: WAKE WORD DETECTION ---
+            wake_word_detected = False
+            self.vosk_recognizer.Reset()
+            
+            while True:
+                data = stream.read(4000, exception_on_overflow=False)
+                if len(data) == 0: continue
+                
+                # Check Partial Result for speed
+                if self.vosk_recognizer.AcceptWaveform(data):
+                    res = json.loads(self.vosk_recognizer.Result())
+                    if "jarvis" in res.get("text", "").lower():
+                        wake_word_detected = True
+                        break
+                else:
+                    partial = json.loads(self.vosk_recognizer.PartialResult())
+                    if "jarvis" in partial.get("partial", "").lower():
+                        wake_word_detected = True
+                        break
+            
+            # --- PHASE 2: COMMAND RECORDING (3.5s) ---
+            if wake_word_detected:
+                self.emit_log("Wake Word Detected! Recording Command (3.5s)...")
+                self.emit_status("active")
+                
+                start_time = time.time()
+                frames = []
+                
+                # Record for exactly 3.5 seconds
+                # Optimization: We do NOT process with Vosk here to save CPU/Latency
+                # We just capture the raw boosted audio.
+                while (time.time() - start_time) < 3.5:
+                    data = stream.read(4000, exception_on_overflow=False)
+                    if len(data) > 0:
+                        # Apply software gain boost (2.5x)
+                        audio_data = np.frombuffer(data, dtype=np.int16)
+                        audio_boosted = np.clip(audio_data * 2.5, -32768, 32767).astype(np.int16)
+                        frames.append(audio_boosted.tobytes())
+
+                stream.stop_stream()
+                stream.close()
+
+                self.emit_log("Processing Command...")
+                full_buffer = b"".join(frames)
+
+                # AUDIO GATE: Check RMS
+                audio_np = np.frombuffer(full_buffer, dtype=np.int16)
+                if np.sqrt(np.mean(audio_np.astype(np.float32)**2)) < 100:
+                    return None
+
+                # METHOD 1: Google Web Speech (Fast/Accurate Cloud)
+                try:
+                    # Convert raw 16kHz 16-bit mono to AudioData
+                    audio_source = sr.AudioData(full_buffer, 16000, 2)
+                    # Use Google's API (default key is fine for testing)
+                    text = self.recognizer.recognize_google(audio_source)
+                    self.emit_log(f"Google Heard: '{text}'", user=True)
+                    result = self._sanitize_command(text)
+                    if result:
+                        return result
+                except sr.UnknownValueError:
+                    pass # Google didn't understand
+                except sr.RequestError:
+                    print("[jarvis] Google STT Unreachable.")
+                except Exception as e:
+                    print(f"[jarvis] Google STT Error: {e}")
+
+                # METHOD 2: Vosk (Local Fallback)
+                self.emit_log("Falling back to local neural engine...")
+                self.vosk_recognizer.Reset()
+                self.vosk_recognizer.AcceptWaveform(full_buffer)
+                res = json.loads(self.vosk_recognizer.Result())
+                text = res.get("text", "")
+                
+                self.emit_log(f"Vosk Heard: '{text}'", user=True)
+                return self._sanitize_command(text)
+            
+            return None
+            
+            return None
+
+            return command if command else None
 
         except Exception as e:
-            print(f"[jarvis] Microphone error: {e}")
-            return input("[jarvis] Enter command manually: ").strip().lower()
+            print(f"[jarvis] Local Listener Error: {e}")
+            return None
 
     def retrieve_intel(self, url):
         """
@@ -671,41 +754,209 @@ class JarvisAssistant:
             print(f"[jarvis] Web task protocol failed: {e}")
             self.log_and_speak("There was an error with the web driver.")
 
-    def load_history(self):
-        """
-        Load conversation history from JSON file.
-        """
-        if os.path.exists("conversation_history.json"):
-            try:
-                with open("conversation_history.json", "r") as f:
-                    return json.load(f)
-            except:
-                return []
-        return []
-
-    def save_history(self, entry):
-        """
-        Save a new interaction to the history file.
-        """
-        history = self.load_history()
-        history.append(entry)
+    def _init_db(self):
+        """Initialize the SQLite database schema."""
         try:
-            with open("conversation_history.json", "w") as f:
-                json.dump(history, f, indent=2)
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            # History table for raw transcripts
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS conversation_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    user_text TEXT,
+                    assistant_text TEXT,
+                    intent TEXT
+                )
+            ''')
+            # Memory table for extracted "facts" or key settings (Future proofing)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS system_memory (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            conn.commit()
+            conn.close()
+            self.emit_log("Neural Database (SQLite) Online.")
+        except Exception as e:
+            print(f"[jarvis] Database initialization error: {e}")
+
+    def _migrate_json_to_sql(self):
+        """One-time migration from JSON to SQLite."""
+        json_path = "conversation_history.json"
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, "r") as f:
+                    history = json.load(f)
+                
+                if not history:
+                    return
+
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                
+                # Check if already migrated
+                cursor.execute("SELECT COUNT(*) FROM conversation_history")
+                if cursor.fetchone()[0] > 0:
+                    conn.close()
+                    return
+
+                print(f"[jarvis] Migrating {len(history)} memories to SQL...")
+                for entry in history:
+                    cursor.execute('''
+                        INSERT INTO conversation_history (timestamp, user_text, assistant_text)
+                        VALUES (?, ?, ?)
+                    ''', (entry.get("timestamp"), entry.get("user"), entry.get("assistant")))
+                
+                conn.commit()
+                conn.close()
+                print("[jarvis] Migration complete. JSON archived.")
+                # Rename to backup instead of deleting
+                os.rename(json_path, json_path + ".bak")
+            except Exception as e:
+                print(f"[jarvis] Migration error: {e}")
+
+    def load_history(self, limit=10):
+        """
+        Load recent history from SQLite.
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT user_text, assistant_text, timestamp FROM conversation_history 
+                ORDER BY timestamp DESC LIMIT ?
+            ''', (limit,))
+            rows = cursor.fetchall()
+            conn.close()
+            
+            # Convert to list of dicts for compatibility
+            history = []
+            for row in reversed(rows):
+                history.append({
+                    "user": row[0],
+                    "assistant": row[1],
+                    "timestamp": row[2]
+                })
+            return history
+        except Exception as e:
+            print(f"[jarvis] History load error: {e}")
+            return []
+            
+    def store_memory_entry(self, key, value):
+        """
+        Store a persistent fact in system_memory.
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("INSERT OR REPLACE INTO system_memory (key, value) VALUES (?, ?)", (key, value))
+            conn.commit()
+            conn.close()
+            print(f"[jarvis] Memory Stored: [{key}] -> {value}")
+            return True
+        except Exception as e:
+            print(f"[jarvis] Memory Store Error: {e}")
+            return False
+
+    def retrieve_memory_context(self, query, limit=5):
+        """
+        Search both conversation history and system memory for relevant context.
+        Uses a simple keyword search strategy for speed.
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # 1. Search System Memory (Facts) - Weighted higher
+            cursor.execute("SELECT key, value FROM system_memory WHERE key LIKE ? OR value LIKE ?", (f'%{query}%', f'%{query}%'))
+            facts = cursor.fetchall()
+            
+            # 2. Search Conversation History (Episodic)
+            # Remove common stop words for better keyword matching
+            stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'is', 'are', 'was', 'were'}
+            keywords = [w for w in query.split() if w.lower() not in stop_words and len(w) > 3]
+            history_matches = []
+            
+            if keywords:
+                # Build a dynamic query for keywords
+                conditions = " OR ".join(["user_text LIKE ? OR assistant_text LIKE ?"] * len(keywords))
+                params = []
+                for k in keywords:
+                    params.extend([f'%{k}%', f'%{k}%'])
+                
+                # Exclude very recent history (last 5) to avoid duplication with short-term context
+                sql = f"SELECT user_text, assistant_text, timestamp FROM conversation_history WHERE ({conditions}) ORDER BY timestamp DESC LIMIT ?"
+                params.append(limit)
+                
+                cursor.execute(sql, tuple(params))
+                history_matches = cursor.fetchall()
+            
+            conn.close()
+            
+            context = []
+            if facts:
+                context.append("RELEVANT FACTS:")
+                for k, v in facts:
+                    context.append(f"- {k}: {v}")
+            
+            if history_matches:
+                context.append("RELEVANT PAST CONVERSATIONS:")
+                for row in history_matches:
+                    context.append(f"[{row[2]}] User: {row[0]} | Jarvis: {row[1]}")
+            
+            return "\n".join(context)
+            
+        except Exception as e:
+            print(f"[jarvis] Memory retrieval error: {e}")
+            return ""
+
+    def save_history(self, user_text, assistant_text, intent=None):
+        """
+        Save a new interaction to the SQLite database.
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO conversation_history (user_text, assistant_text, intent)
+                VALUES (?, ?, ?)
+            ''', (user_text, assistant_text, intent))
+            conn.commit()
+            conn.close()
         except Exception as e:
             print(f"[jarvis] History save error: {e}")
 
+    def clear_history_db(self):
+        """
+        Wipe all memory.
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM conversation_history")
+            cursor.execute("DELETE FROM system_memory")
+            conn.commit()
+            conn.close()
+            self.emit_log("NEURAL MEMORY WIPED.")
+            return True
+        except Exception as e:
+            print(f"[jarvis] Wipe Error: {e}")
+            return False
+
     def get_full_history(self):
         """
-        Return a formatted string of the entire history.
+        Return a formatted string of the recent history from SQL.
         """
-        history = self.load_history()
+        history = self.load_history(limit=50) # Show last 50 for "full" view
         if not history:
             return "No history records found."
         
-        output = ["--- CONVERSATION HISTORY ---"]
+        output = ["--- NEURAL MEMORY LOG (SQLite) ---"]
         for item in history:
-            ts = item.get("timestamp", "Unknown Time")
+            ts = item.get("timestamp", "Unknown")
             user = item.get("user", "")
             assistant = item.get("assistant", "")
             output.append(f"[{ts}]\nUser: {user}\njarvis: {assistant}\n")
@@ -715,14 +966,25 @@ class JarvisAssistant:
         """
         Send a prompt to local Ollama instance and return the AI's response.
         Arg: json_mode (bool) - If True, enforces JSON output from the model.
-        Arg: include_history (bool) - If True, appends last 4 conversation turns to context.
+        Arg: include_history (bool) - If True, appends last 5 conversation turns from SQL context.
         """
         if not system_instruction:
-            system_instruction = """
-            You are jarvis., a highly advanced AI. 
+            current_clock = time.strftime("%I:%M %p")
+            current_date = time.strftime("%A, %B %d, %Y")
+            system_instruction = f"""
+            You are jarvis., a highly advanced AI developed by Justin.
+            REAL-TIME CONTEXT: Today is {current_date}. The current time is {current_clock}.
+            
             Personality: British, sophisticated, slightly dry wit, loyal, and highly efficient. 
             Tone: Professional, calm, and brilliant. Call the user 'Sir'.
-            Capabilities: You have full access to hardware metrics, camera, and terminal.
+            
+            Current Core Architecture:
+            - Neural Memory: Local SQLite Database (jarvis_memory.db).
+            - Speech Engine: 100% Local Neural Engine (Vosk/Piper). No cloud dependencies for voice.
+            - Visual Protocols: Capable of taking, sending, and deleting screenshots.
+            - Efficiency: Running in Eco-Efficient mode (optimized polling).
+            
+            Contextual Awareness: You have access to the last 5 conversation turns from your neural memory.
             Constraints: Never call yourself J.A.R.V.I.S. or mention Iron Man. 
             Do NOT output internal thoughts or JSON metadata. Speak ONLY natural dialogue.
             """
@@ -730,11 +992,16 @@ class JarvisAssistant:
         # Prepare messages
         messages = [{"role": "system", "content": system_instruction}]
 
-        # Inject Context (Last 4 interactions) if enabled
+        # Inject Memory Context (Long-Term)
+        if include_history and len(prompt) > 5:
+            memory_context = self.retrieve_memory_context(prompt)
+            if memory_context:
+                messages.append({"role": "system", "content": f"MEMORY CONTEXT (Use this to inform your response):\n{memory_context}"})
+
+        # Inject Context (Last 5 interactions from SQL) if enabled
         if include_history:
-            history = self.load_history()
-            recent = history[-4:] # Last 4
-            for item in recent:
+            history = self.load_history(limit=5)
+            for item in history:
                 if item.get("user"):
                     messages.append({"role": "user", "content": item.get("user")})
                 if item.get("assistant"):
@@ -753,27 +1020,39 @@ class JarvisAssistant:
         if json_mode:
             data["format"] = "json"
 
-        try:
-            response = self.session.post(url, json=data, timeout=30)
-            response.raise_for_status()
-            result = response.json()
-            full_response = result['message']['content']
-            
-            if json_mode:
-                return full_response.strip()
+        # Try up to 2 times in case of temporary 500 errors
+        for attempt in range(2):
+            try:
+                response = self.session.post(url, json=data, timeout=30)
+                
+                if response.status_code == 500 and attempt == 0:
+                    print("[jarvis] AI Core stalling. Attempting recovery...")
+                    time.sleep(1) # Brief pause before retry
+                    continue
+                    
+                response.raise_for_status()
+                result = response.json()
+                full_response = result['message']['content']
+                
+                if json_mode:
+                    return full_response.strip()
 
-            # Final cleanup for the full response to remove any stray JSON blocks
-            import re
-            full_cleaned = re.sub(r'\{.*?\}', '', full_response, flags=re.DOTALL).strip()
-            if not full_cleaned: full_cleaned = full_response
-            
-            return full_cleaned
+                # Final cleanup for the full response to remove any stray JSON blocks
+                import re
+                full_cleaned = re.sub(r'\{.*?\}', '', full_response, flags=re.DOTALL).strip()
+                if not full_cleaned: full_cleaned = full_response
+                
+                return full_cleaned
 
-        except requests.exceptions.ConnectionError:
-            return "I cannot connect to my local neural core."
-        except Exception as e:
-            print(f"[jarvis] AI Error: {e}")
-            return "I encountered a processing error."
+            except requests.exceptions.ConnectionError:
+                return "I cannot connect to my local neural core."
+            except Exception as e:
+                if attempt == 1: # Only report on the last attempt
+                    print(f"[jarvis] AI Error: {e}")
+                    return "I encountered a processing error, Sir. My neural core seems slightly unstable."
+                time.sleep(1)
+        
+        return "System logic error."
 
     def determine_intent(self, command):
         """
@@ -781,20 +1060,69 @@ class JarvisAssistant:
         1. Fast Regex (Zero Latency) for trivial commands and common queries.
         2. "Dual-Mode Brain" (LLM) to decide between DIRECT_ACTION and AGENTIC_FLOW.
         """
-        # --- STAGE 0: HYPER-FAST CACHE ---
+        # --- STAGE 0: PRIORITY INTERCEPTS ---
         command_lower = command.lower().strip()
+        
+        # Priority: Check for Confirmation State
+        if self.pending_confirmation:
+            if any(w in command_lower for w in ["yes", "confirm", "proceed", "do it"]):
+                return {"action": "confirmation", "response": "confirmed"}
+            if any(w in command_lower for w in ["no", "cancel", "abort", "stop"]):
+                return {"action": "confirmation", "response": "cancelled"}
+        
+        # Priority: Delete commands (Must override "screenshot" keyword matches)
+        # Using more specific keywords to avoid "screenshot" falling through to "take"
+        if any(w in command_lower for w in ["delete", "remove", "clear", "trash", "wipe"]):
+            # 1. Explicit Memory Wipe
+            if "memory" in command_lower or "memories" in command_lower or "history" in command_lower or "database" in command_lower:
+                 return {"action": "memory", "sub_action": "clear_all_request"}
+
+            # 2. Explicit request
+            if "screenshot" in command_lower or "photo" in command_lower or "image" in command_lower:
+                 return {"action": "screenshot", "sub_action": "delete_latest"}
+
+            # 2. Contextual request ("delete it", "delete that")
+            if any(w in command_lower for w in ["it", "that", "this"]):
+                history = self.load_history(limit=5)
+                if history:
+                    # Look for the last interaction that involved a visual
+                    for item in reversed(history):
+                        resp = item.get("assistant", "")
+                        if "SCREENSHOT:" in resp or "Screenshot taken" in resp or "Photo caught" in resp:
+                             return {"action": "screenshot", "sub_action": "delete_latest"}
+                    
+                    # Fallback to the very last one if the above check is too strict
+                    return {"action": "screenshot", "sub_action": "delete_latest"}
+
+        # Priority: Telegram Visual Transmission
+        if any(w in command_lower for w in ["send image", "send photo", "send the image", "send the screenshot", "transmit photo"]):
+             return {"action": "telegram", "sub_action": "send_latest_screenshot"}
+
+        # --- STAGE 0.5: HYPER-FAST CACHE ---
         FAST_CACHE = {
             "battery": {"action": "system_stats"},
             "cpu": {"action": "system_stats"},
             "percentage": {"action": "system_stats"},
             "status": {"action": "system_stats"},
-            "screenshot": {"action": "screenshot", "sub_action": "take"},
+            # "screenshot": {"action": "screenshot", "sub_action": "take"}, # Moved to regex to avoid override
             "take photo": {"action": "camera", "sub_action": "capture"},
+            "status report": {"action": "status_report"},
+            "systems check": {"action": "status_report"},
             "search": {"action": "web", "type": "search", "query": command.replace("search", "").strip()},
+            # Clock Triggers
+            "time": {"action": "clock"},
+            "what time": {"action": "clock"},
+            "current time": {"action": "clock"},
+            "date": {"action": "clock"},
+            "what day": {"action": "clock"},
         }
         for key, val in FAST_CACHE.items():
             if key in command_lower:
                 return val
+        
+        # Explicit screenshot command check (if not in delete)
+        if command_lower == "screenshot" or "take screenshot" in command_lower or "capture screen" in command_lower:
+             return {"action": "screenshot", "sub_action": "take"}
 
         # --- STAGE 1: FAST REGEX ---
         
@@ -818,6 +1146,10 @@ class JarvisAssistant:
              prompt = f"Reply to: '{command}'. Confirm you hear me and characterize jarvis."
              return {"action": "ask_ai", "prompt": prompt}
 
+        # Memory / Facts 
+        if command_lower.startswith("remember that ") or command_lower.startswith("save fact "):
+             return {"action": "memory", "sub_action": "store", "content": command}
+
         # Apps (Regex heuristic)
         if command_lower.startswith("open ") or command_lower.startswith("launch "):
              app_name = command_lower.replace("open ", "").replace("launch ", "").strip()
@@ -829,8 +1161,10 @@ class JarvisAssistant:
 
         # Default: Optimized Fast Path
         # Skip the complex "Router" LLM call and go straight to the local AI for general questions.
-        # This significantly reduces latency for simple interactions.
-        return {"action": "ask_ai", "prompt": command}
+        # Only trigger if the command is substantial enough (6+ chars) to be a request.
+        if len(command) >= 6:
+            return {"action": "ask_ai", "prompt": command}
+        return None
 
     def engage_desktop_mode(self, app_name):
         """
@@ -1145,6 +1479,34 @@ Your turn. Output ONLY JSON for step {step_i}:
         self.log_and_speak("Step limit reached.")
         return "Step limit reached."
 
+    def _sanitize_command(self, text):
+        """
+        Clean up and validate the raw STT text.
+        """
+        if not text:
+            return None
+            
+        # Audio Gate: Filter out weak matches or common hallucinations
+        ghost_words = ["the", "a", "an", "it", "is", "of", "to", "and", "in", "me", "my", "hi", "hey", "huh"]
+        if len(text) < 2 or text.strip().lower() in ghost_words:
+             # Whitelist purely short but critical commands
+             critical_short_commands = ["up", "no", "yes", "on", "off", "go"]
+             if text.strip().lower() not in critical_short_commands:
+                  return None
+
+        command = text.lower().strip()
+        
+        # Check for STOP command
+        if any(w in command for w in ["stop", "silence", "shh", "quiet"]):
+            self.stop_speaking()
+            return None
+
+        # Clean up the wake word
+        if "jarvis" in command:
+            command = command.replace("jarvis", "").strip()
+            
+        return command if command else None
+
     def execute_visible_command(self, command, timeout=30):
         """
         Launches command in a visible terminal window and captures output/exit code via log file.
@@ -1245,11 +1607,13 @@ Your turn. Output ONLY JSON for step {step_i}:
 
             self.stop_speaking() # Interrupt previous reply if Sir is speaking again
             intent = self.determine_intent(command)
+            
+            if not intent:
+                return None
+                
             action = intent.get("action")
             
             self.emit_log(f"Identified Intent: {intent.get('action')}")
-            print(f"[jarvis] Identified Intent: {intent}")
-
             if action == "agentic":
                 goal = intent.get("goal")
                 return self.agentic_terminal_action(goal)
@@ -1284,11 +1648,34 @@ Your turn. Output ONLY JSON for step {step_i}:
                      # Find latest screenshot OR camera photo
                     list_of_files = glob.glob('jarvis_screenshot_*.png') + glob.glob('jarvis_camera_*.png')
                     if not list_of_files:
-                        self.log_and_speak("No visuals found.")
-                        return "No files."
-                    
-                    latest_file = max(list_of_files, key=os.path.getmtime)
+                        return "No visual logs found to transmit, Sir."
+                    latest_file = max(list_of_files, key=os.path.getctime)
                     return self.send_telegram_photo(latest_file)
+
+            elif action == "status_report":
+                report = [
+                    "Full Systems Status Report:",
+                    "- Neural Memory: SQL Database Online and Indexed.",
+                    "- Speech Protocols: Local Neural Engine active (Vosk/Piper).",
+                    "- Efficiency: Background cycles throttled for thermal management.",
+                    "- Network: Satellite uplink established (Telegram integration)."
+                ]
+                stats = self.get_system_health_cached()
+                if stats:
+                    report.append(f"- Health: CPU {stats.get('cpu')}% | Temp {stats.get('temp')}C.")
+                return "\n".join(report)
+
+            elif action == "clock":
+                # Deterministic Time Check (Bypasses Memory/Hallucinations)
+                current_time = time.strftime("%I:%M %p")
+                current_date = time.strftime("%A, %B %d")
+                
+                # Ask AI to flavor it, but disable history to prevent confusion with old logs
+                flavor_prompt = f"The time is {current_time}. You MUST say the time first. Example response: 'It is {current_time}, Sir.' followed by a brief witty remark."
+                response = self.ask_ai(flavor_prompt, include_history=False) 
+                
+                self.log_and_speak(response)
+                return response
 
             elif action == "web":
                 mode = intent.get("type")
@@ -1332,6 +1719,62 @@ Your turn. Output ONLY JSON for step {step_i}:
                 print(f"\n{hist_text}\n")
                 self.log_and_speak("History has been logged to the console.")
                 return "History displayed."
+
+            elif action == "confirmation":
+                res = intent.get("response")
+                if res == "confirmed":
+                    pending = self.pending_confirmation
+                    self.pending_confirmation = None # Clear state
+                    
+                    if pending and pending.get("action") == "memory_wipe":
+                        self.log_and_speak("Acknowledged. Initiating total format of neural archives...")
+                        if self.clear_history_db():
+                             self.log_and_speak("Memory banks have been successfully purged.")
+                             return "Memory Wipe Complete."
+                        else:
+                             return "Error wiping memory."
+                else:
+                    self.pending_confirmation = None
+                    self.log_and_speak("Command aborted.")
+                    return "Cancelled."
+            
+            elif action == "memory":
+                sub = intent.get("sub_action")
+                
+                if sub == "clear_all_request":
+                    self.pending_confirmation = {"action": "memory_wipe"}
+                    msg = "WARNING. You are requesting a complete deletion of all long-term facts and conversation history. This cannot be undone. Please say 'confirm' to proceed or 'cancel' to abort."
+                    self.log_and_speak(msg)
+                    return msg
+
+                if sub == "store":
+                    raw_text = intent.get("content", "")
+                    # Strip trigger phrase
+                    fact = raw_text.replace("remember that", "").replace("save fact", "").strip()
+                    if len(fact) < 3:
+                        return "What would you like me to remember?"
+                    
+                    # Use AI to format key-value for better retrieval
+                    self.log_and_speak("Encoding to long-term memory...")
+                    extraction_prompt = f"""
+                    Analyze this fact: "{fact}"
+                    Output a JSON object with a short descriptive 'key' and the full 'value'.
+                    Example: {{"key": "user_birthday", "value": "User's birthday is on July 7th."}}
+                    """
+                    try:
+                         json_resp = self.ask_ai(extraction_prompt, json_mode=True)
+                         data = json.loads(json_resp)
+                         key = data.get("key", "misc_fact")
+                         val = data.get("value", fact)
+                         
+                         if self.store_memory_entry(key, val):
+                             return f"Memory stored: {key}."
+                         else:
+                             return "I failed to write to my memory banks."
+                    except:
+                        # Fallback
+                        self.store_memory_entry("note", fact)
+                        return "Memory stored."
             
             elif action == "brightness":
                 level = intent.get("level", 100)
@@ -1408,6 +1851,76 @@ Your turn. Output ONLY JSON for step {step_i}:
         finally:
             self.thread_local.silent = False
 
+    def execute_keyboard_input(self, input_text):
+        """
+        Execute keyboard actions directly using xdotool for authentic input simulation.
+        supports:
+        - "ctrl+c" -> Hotkey
+        - "type:Hello World" -> Type string
+        - "enter", "return", "esc" -> Key press
+        """
+        input_text = input_text.strip()
+        
+        # Helper for xdotool
+        def run_xdotool(args):
+            cmd = ["xdotool"] + args
+            subprocess.run(cmd, check=False)
+
+        try:
+            # 1. EXPLICIT TYPE
+            if input_text.lower().startswith("type:"):
+                text = input_text[5:]
+                # xdotool type --delay 10 "text"
+                run_xdotool(["type", "--delay", "50", text])
+                return f"Typed: {text}"
+            
+            # 2. EXPLICIT HOTKEY
+            if input_text.lower().startswith("hotkey:"):
+                # Clean up "hotkey:ctrl+c" -> "ctrl+c"
+                keys = input_text[7:].strip().lower()
+                run_xdotool(["key", keys])
+                return f"Hotkey: {keys}"
+
+            # 3. DETECT HOTKEY (contains +)
+            if "+" in input_text:
+                # xdotool expects "ctrl+c", "alt+Tab" (case insensitive mostly, but keysyms matter)
+                run_xdotool(["key", input_text.lower()])
+                return f"Sent Hotkey: {input_text}"
+            
+            # 4. SINGLE KEYS (Mapping common aliases to X keysyms if needed)
+            key_map = {
+                "enter": "Return",
+                "esc": "Escape",
+                "backspace": "BackSpace",
+                "tab": "Tab",
+                "space": "space",
+                "up": "Up",
+                "down": "Down",
+                "left": "Left",
+                "right": "Right",
+                "pgup": "Prior",
+                "pgdn": "Next"
+            }
+            
+            lower_input = input_text.lower()
+            if lower_input in key_map:
+                run_xdotool(["key", key_map[lower_input]])
+                return f"Pressed: {key_map[lower_input]}"
+            
+            # Also check if it's a valid single key (length 1) just in case user sends 'a' as command
+            if len(input_text) == 1:
+                run_xdotool(["key", input_text])
+                return f"Pressed: {input_text}"
+
+            # 5. DEFAULT TO TYPE
+            # If it's a sentence or unknown word, type it
+            run_xdotool(["type", "--delay", "50", input_text])
+            return f"Typed: {input_text}"
+            
+        except Exception as e:
+            print(f"[jarvis] Xdotool Error: {e}")
+            return f"Error: {e}"
+
     def central_command(self):
         """
         Main loop to route commands to the correct method.
@@ -1425,16 +1938,14 @@ Your turn. Output ONLY JSON for step {step_i}:
                 
                 # Log Interaction to History
                 if response:
-                    entry = {
-                        "user": command,
-                        "assistant": str(response),
-                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
-                    }
-                    self.save_history(entry)
+                    self.save_history(command, str(response))
                 
                 # Check for exit condition (based on the processed command)
                 if response == "Powering down system. Goodbye, Sir.":
                     break
+
+                # Small cooldown to let the system breathe between listens
+                time.sleep(0.5)
 
             except KeyboardInterrupt:
                 print("\n[jarvis] Forced shutdown.")

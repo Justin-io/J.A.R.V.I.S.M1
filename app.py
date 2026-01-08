@@ -12,6 +12,12 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = 'jarvis_secret_key'
 socketio = SocketIO(app, cors_allowed_origins="*")
 
+# Suppress annoying engineio/socketio logs
+import logging
+logging.getLogger('werkzeug').setLevel(logging.ERROR)
+logging.getLogger('engineio').setLevel(logging.ERROR)
+logging.getLogger('socketio').setLevel(logging.ERROR)
+
 # Global variables
 jarvis = None
 jarvis_thread = None
@@ -21,6 +27,16 @@ def jarvis_event_handler(event_name, data):
     Callback function provided to JarvisAssistant to emit SocketIO events.
     """
     socketio.emit(event_name, data)
+
+@socketio.on('stop_command')
+def handle_stop_command():
+    """
+    Handle interrupt signal from Web UI.
+    """
+    print("[WebUI] Interrupt signal received.")
+    if jarvis:
+        jarvis.stop_speaking()
+
 
 @app.route('/')
 def index():
